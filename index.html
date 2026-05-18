@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>64x32 P4 RGB Matrix Simulator</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --panel-bg: #0b0b0b;
+      --frame: #1a1a1a;
+      --ui-bg: #111;
+      --ui-border: #333;
+      --text: #e6e6e6;
+      --subtle: #aaa;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: radial-gradient(circle at top, #1d1d1d, #0a0a0a 55%);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, sans-serif;
+      color: var(--text);
+      padding: 18px;
+    }
+    .app {
+      width: min(1080px, 100%);
+      display: grid;
+      grid-template-columns: minmax(500px, 720px) minmax(290px, 340px);
+      gap: 20px;
+      align-items: start;
+    }
+    .matrix-frame {
+      background: linear-gradient(145deg, #2b2b2b, #111);
+      border: 3px solid #333;
+      border-radius: 10px;
+      box-shadow: inset 0 0 0 4px #050505, 0 16px 40px rgba(0,0,0,.5);
+      padding: 18px;
+    }
+    .matrix {
+      background: var(--panel-bg);
+      border-radius: 6px;
+      display: grid;
+      gap: 3px;
+      padding: 8px;
+      justify-content: center;
+      border: 1px solid #222;
+    }
+    .led {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #060606;
+      box-shadow: inset 0 0 2px rgba(255,255,255,.08);
+      transition: background-color .05s linear, box-shadow .05s linear;
+    }
+    .controls {
+      background: var(--ui-bg);
+      border: 1px solid var(--ui-border);
+      border-radius: 10px;
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+    }
+    h1 { font-size: 1.05rem; margin: 0; }
+    .sub { color: var(--subtle); font-size: .86rem; margin: 0; }
+    .group { display: grid; gap: 7px; }
+    label { font-size: .9rem; color: #d8d8d8; }
+    select, input[type="text"], input[type="range"], button {
+      width: 100%;
+      background: #191919;
+      color: #e9e9e9;
+      border: 1px solid #383838;
+      border-radius: 8px;
+      padding: 8px;
+      font-size: .92rem;
+    }
+    input[type="range"] { padding: 5px; }
+    button { cursor: pointer; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .hint { font-size: .75rem; color: #9e9e9e; }
+    @media (max-width: 980px) {
+      .app { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="matrix-frame">
+      <div id="matrix" class="matrix" aria-label="64x32 LED matrix simulator"></div>
+    </div>
+
+    <aside class="controls">
+      <h1>P4 64x32 Simulator</h1>
+      <p class="sub">Mock data now, easy to swap for live feeds later.</p>
+
+      <div class="group">
+        <label for="mode">Display mode</label>
+        <select id="mode">
+          <option value="clock">Clock + Weather</option>
+          <option value="sports">Sports Score</option>
+          <option value="message">Custom Message</option>
+          <option value="rainbow">Rainbow Test</option>
+        </select>
+      </div>
+
+      <div class="group">
+        <label for="team">Team (sports mode)</label>
+        <select id="team">
+          <option value="rangers">Texas Rangers</option>
+          <option value="cowboys">Dallas Cowboys</option>
+          <option value="stars">Dallas Stars</option>
+          <option value="mavericks">Dallas Mavericks</option>
+        </select>
+      </div>
+
+      <div class="group">
+        <label for="messageText">Custom message (scrolling)</label>
+        <input id="messageText" type="text" maxlength="120" value="GO TEXAS! LED MATRIX TEST" />
+        <button id="updateMessage">Update Message</button>
+      </div>
+
+      <div class="group">
+        <label for="brightness">Brightness</label>
+        <input id="brightness" type="range" min="0.1" max="1" step="0.05" value="0.8" />
+      </div>
+
+      <div class="group">
+        <label for="speed">Animation speed</label>
+        <input id="speed" type="range" min="0.2" max="3" step="0.1" value="1" />
+      </div>
+
+      <div class="row">
+        <button id="togglePause">Pause</button>
+        <button id="resetAnim">Reset</button>
+      </div>
+
+      <p class="hint">Future integration points are marked in JS comments for Home Assistant/API/MQTT/HTTP/JSON.</p>
+    </aside>
+  </div>
+
+<script>
+(() => {
+  const WIDTH = 64;
+  const HEIGHT = 32;
+  const matrixEl = document.getElementById('matrix');
+  matrixEl.style.gridTemplateColumns = `repeat(${WIDTH}, 12px)`;
+
+  const state = {
+    mode: 'clock', team: 'rangers', brightness: 0.8, speed: 1, paused: false,
+    message: 'GO TEXAS! LED MATRIX TEST', scrollX: WIDTH, rainbowOffset: 0
+  };
+
+  const leds = [];
+  const pixels = Array.from({ length: HEIGHT }, () => Array.from({ length: WIDTH }, () => [0,0,0]));
+
+  for (let y = 0; y < HEIGHT; y++) {
+    const row = [];
+    for (let x = 0; x < WIDTH; x++) {
+      const led = document.createElement('div');
+      led.className = 'led';
+      matrixEl.appendChild(led);
+      row.push(led);
+    }
+    leds.push(row);
+  }
+
+  const font = {
+    '0':['111','101','101','101','111'],'1':['010','110','010','010','111'],'2':['111','001','111','100','111'],'3':['111','001','111','001','111'],
+    '4':['101','101','111','001','001'],'5':['111','100','111','001','111'],'6':['111','100','111','101','111'],'7':['111','001','001','001','001'],
+    '8':['111','101','111','101','111'],'9':['111','101','111','001','111'],':':['0','1','0','1','0'],'-':['000','000','111','000','000'],' ':[ '0','0','0','0','0'],
+    'A':['010','101','111','101','101'],'B':['110','101','110','101','110'],'C':['011','100','100','100','011'],'D':['110','101','101','101','110'],
+    'E':['111','100','110','100','111'],'F':['111','100','110','100','100'],'G':['011','100','101','101','011'],'H':['101','101','111','101','101'],
+    'I':['111','010','010','010','111'],'J':['111','001','001','101','111'],'K':['101','101','110','101','101'],'L':['100','100','100','100','111'],
+    'M':['101','111','101','101','101'],'N':['101','111','111','111','101'],'O':['111','101','101','101','111'],'P':['111','101','111','100','100'],
+    'Q':['111','101','101','111','001'],'R':['111','101','111','110','101'],'S':['011','100','111','001','110'],'T':['111','010','010','010','010'],
+    'U':['101','101','101','101','111'],'V':['101','101','101','101','010'],'W':['101','101','101','111','101'],'X':['101','101','010','101','101'],
+    'Y':['101','101','010','010','010'],'Z':['111','001','010','100','111'],'!':['1','1','1','0','1'],'.':['0','0','0','0','1']
+  };
+
+  function clear() { for (let y=0;y<HEIGHT;y++) for (let x=0;x<WIDTH;x++) pixels[y][x] = [0,0,0]; }
+  function setPixel(x,y,r,g,b){ if(x>=0&&x<WIDTH&&y>=0&&y<HEIGHT) pixels[y][x]=[r,g,b]; }
+
+  function drawText(x,y,text,color,scale=1){
+    let cx=x;
+    for(const ch of text.toUpperCase()){
+      const glyph=font[ch]||font[' '];
+      const gw = glyph[0].length;
+      for(let gy=0;gy<glyph.length;gy++) for(let gx=0;gx<gw;gx++){
+        if(glyph[gy][gx]==='1') for(let sy=0;sy<scale;sy++) for(let sx=0;sx<scale;sx++) setPixel(cx+gx*scale+sx,y+gy*scale+sy,...color);
+      }
+      cx += (gw+1)*scale;
+    }
+    return cx-x;
+  }
+
+  function drawClockWeather(){
+    const now = new Date();
+    const hh = now.getHours().toString().padStart(2,'0');
+    const mm = now.getMinutes().toString().padStart(2,'0');
+    const time = `${hh}:${mm}`;
+    const date = `${now.getMonth()+1}-${now.getDate()}`;
+
+    // Mock weather now; replace with Home Assistant/Weather API fetch + cache.
+    const weather = { tempF: 78, icon:'SUN', cond:'CLR' };
+
+    drawText(2,2,time,[0,255,120],2);
+    drawText(3,15,date,[90,160,255],1);
+    drawText(3,22,`${weather.icon} ${weather.tempF}F`,[255,210,40],1);
+    drawText(42,22,weather.cond,[255,90,90],1);
+  }
+
+  const sports = {
+    rangers: { name:'RANGERS', opp:'HOU', score:'5-3', status:'BOT 7' },
+    cowboys: { name:'COWBOYS', opp:'NYG', score:'24-17', status:'Q4 08:11' },
+    stars: { name:'STARS', opp:'COL', score:'2-1', status:'3RD 14:22' },
+    mavericks: { name:'MAVS', opp:'LAL', score:'102-99', status:'Q4 01:45' }
+  };
+
+  function drawSports(){
+    // Replace this mock object with an API adapter (ESPN, The Odds API, etc.).
+    const g = sports[state.team];
+    drawText(2,2,g.name,[0,180,255],1);
+    drawText(2,10,`VS ${g.opp}`,[255,255,255],1);
+    drawText(2,18,g.score,[255,220,0],2);
+    drawText(2,28,g.status,[255,80,80],1);
+  }
+
+  function drawMessage(){
+    const color=[255,65,180];
+    const width = drawText(state.scrollX,12,state.message,color,2);
+    state.scrollX -= Math.max(1, Math.round(state.speed * 1.3));
+    if(state.scrollX < -width) state.scrollX = WIDTH;
+  }
+
+  function hsvToRgb(h,s,v){
+    let c=v*s,x=c*(1-Math.abs((h/60)%2-1)),m=v-c,r=0,g=0,b=0;
+    if(h<60)[r,g,b]=[c,x,0];else if(h<120)[r,g,b]=[x,c,0];else if(h<180)[r,g,b]=[0,c,x];else if(h<240)[r,g,b]=[0,x,c];else if(h<300)[r,g,b]=[x,0,c];else [r,g,b]=[c,0,x];
+    return [(r+m)*255,(g+m)*255,(b+m)*255];
+  }
+
+  function drawRainbow(){
+    for(let y=0;y<HEIGHT;y++) for(let x=0;x<WIDTH;x++){
+      const hue = (x*6 + y*2 + state.rainbowOffset) % 360;
+      const [r,g,b]=hsvToRgb(hue,1,1);
+      setPixel(x,y,r,g,b);
+    }
+    state.rainbowOffset = (state.rainbowOffset + 3*state.speed) % 360;
+  }
+
+  function render(){
+    const bright = state.brightness;
+    for(let y=0;y<HEIGHT;y++) for(let x=0;x<WIDTH;x++){
+      const [r,g,b]=pixels[y][x];
+      const rr=Math.round(r*bright), gg=Math.round(g*bright), bb=Math.round(b*bright);
+      const led=leds[y][x];
+      if(rr+gg+bb===0){ led.style.backgroundColor='#060606'; led.style.boxShadow='inset 0 0 2px rgba(255,255,255,.08)'; }
+      else {
+        led.style.backgroundColor=`rgb(${rr},${gg},${bb})`;
+        led.style.boxShadow=`0 0 7px rgba(${rr},${gg},${bb},0.65), 0 0 15px rgba(${rr},${gg},${bb},0.35), inset 0 0 1px rgba(255,255,255,.5)`;
+      }
+    }
+  }
+
+  function tick(){
+    if(!state.paused){
+      clear();
+      if(state.mode==='clock') drawClockWeather();
+      else if(state.mode==='sports') drawSports();
+      else if(state.mode==='message') drawMessage();
+      else if(state.mode==='rainbow') drawRainbow();
+      render();
+    }
+    const fps = 22 * state.speed;
+    setTimeout(() => requestAnimationFrame(tick), 1000 / Math.max(10, fps));
+  }
+
+  document.getElementById('mode').addEventListener('change', e => { state.mode=e.target.value; if(state.mode==='message') state.scrollX=WIDTH; });
+  document.getElementById('team').addEventListener('change', e => state.team=e.target.value);
+  document.getElementById('brightness').addEventListener('input', e => { state.brightness=parseFloat(e.target.value); render(); });
+  document.getElementById('speed').addEventListener('input', e => state.speed=parseFloat(e.target.value));
+  document.getElementById('updateMessage').addEventListener('click', () => {
+    state.message=document.getElementById('messageText').value.trim() || 'HELLO';
+    state.scrollX=WIDTH;
+  });
+  document.getElementById('togglePause').addEventListener('click', e => {
+    state.paused=!state.paused;
+    e.target.textContent=state.paused?'Resume':'Pause';
+  });
+  document.getElementById('resetAnim').addEventListener('click', () => { state.scrollX=WIDTH; state.rainbowOffset=0; state.paused=false; document.getElementById('togglePause').textContent='Pause'; });
+
+  tick();
+})();
+</script>
+</body>
+</html>
