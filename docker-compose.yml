@@ -4,3 +4,7 @@ services:
     container_name: matrix-v2
     network_mode: host
     restart: unless-stopped
+    environment:
+      - PUBLIC_HOST=192.168.1.252
+      - PIXLET_PORT=8080
+      - BROWSER_PIXLET_URL=http://192.168.1.252:8080/

@@ -4,6 +4,14 @@ import subprocess
 from pathlib import Path
 from PIL import Image
 from urllib.parse import parse_qsl, urlencode, urlparse
+import os
+
+PUBLIC_HOST = os.environ.get("PUBLIC_HOST", "192.168.1.252")
+PIXLET_PORT = os.environ.get("PIXLET_PORT", "8080")
+BROWSER_PIXLET_URL = os.environ.get(
+    "BROWSER_PIXLET_URL",
+    f"http://{PUBLIC_HOST}:{PIXLET_PORT}/"
+)
 
 app = Flask(__name__)
 
