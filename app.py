@@ -1,14 +1,18 @@
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, send_file, url_for
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import subprocess
+import threading
 from pathlib import Path
 from PIL import Image
 from urllib.parse import parse_qsl, urlencode, urlparse
 import os
+import requests
 
 PUBLIC_HOST = os.environ.get("PUBLIC_HOST", "192.168.1.252")
 FLASK_PORT = os.environ.get("FLASK_PORT", "5050")
 PIXLET_PORT = os.environ.get("PIXLET_PORT", "8080")
+PIXLET_INTERNAL_PORT = os.environ.get("PIXLET_INTERNAL_PORT", "18080")
 BROWSER_PIXLET_URL = os.environ.get(
     "BROWSER_PIXLET_URL",
     f"http://{PUBLIC_HOST}:{PIXLET_PORT}/"
@@ -34,6 +38,7 @@ DATA_DIR.mkdir(exist_ok=True)
 RENDER_DIR.mkdir(exist_ok=True)
 
 pixlet_process = None
+preview_proxy_server = None
 current_app = None
 current_app_path = None
 
@@ -205,7 +210,11 @@ def normalize_options(raw_options):
     if raw_options.startswith("?"):
         raw_options = raw_options[1:]
 
-    pairs = parse_qsl(raw_options, keep_blank_values=True)
+    pairs = [
+        (key, value)
+        for key, value in parse_qsl(raw_options, keep_blank_values=True)
+        if key != "cache"
+    ]
     return urlencode(pairs)
 
 
@@ -234,9 +243,257 @@ def stop_pixlet():
 
 def start_pixlet(full_path):
     return subprocess.Popen(
-        ["pixlet", "serve", "--host", "0.0.0.0", "--port", PIXLET_PORT, str(full_path)],
+        ["pixlet", "serve", "--host", "127.0.0.1", "--port", PIXLET_INTERNAL_PORT, str(full_path)],
         cwd=BASE_DIR,
     )
+
+
+def save_options_for_app(app_path, raw_options):
+    full_path = (APPS_DIR / app_path).resolve()
+
+    if not str(full_path).startswith(str(APPS_DIR.resolve())):
+        return False, "Invalid app path"
+
+    if not full_path.exists() or full_path.suffix != ".star":
+        return False, "App not found"
+
+    options = load_options()
+    normalized = normalize_options(raw_options)
+
+    if normalized:
+        options[app_path] = normalized
+    else:
+        options.pop(app_path, None)
+
+    save_options(options)
+    return True, normalized
+
+
+def no_app_preview_html():
+    return f"""<!doctype html>
+<html>
+<head>
+    <title>Pixlet Preview</title>
+    <style>
+        body {{ margin: 0; padding: 40px; background: #111; color: #f5f5f5; font-family: Arial, sans-serif; }}
+        a {{ color: #8ab4ff; }}
+    </style>
+</head>
+<body>
+    <h1>No Pixlet app is running</h1>
+    <p>Open the dashboard and click Run App. The preview will show here and settings will autosave.</p>
+    <p><a href="http://{PUBLIC_HOST}:{FLASK_PORT}/">Open dashboard</a></p>
+</body>
+</html>"""
+
+
+def autosave_script():
+    if current_app:
+        return f"""
+        <script>
+        (function() {{
+            const statusEl = document.createElement('div');
+            statusEl.style.cssText = 'position:fixed;right:10px;bottom:10px;z-index:2147483647;background:#181818;color:#f5f5f5;border:1px solid #333;border-radius:6px;padding:7px 10px;font:12px Arial,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.35);';
+            statusEl.textContent = 'Settings autosave is ready.';
+            document.addEventListener('DOMContentLoaded', function() {{
+                document.body.appendChild(statusEl);
+            }});
+
+            let lastSavedSearch = "";
+            let saveTimer = null;
+
+            function setStatus(message) {{
+                statusEl.textContent = message;
+            }}
+
+            async function saveSearch(search) {{
+                if (!search || search === "?" || search === lastSavedSearch) {{
+                    return;
+                }}
+
+                lastSavedSearch = search;
+                setStatus("Saving settings...");
+
+                const response = await fetch('/__save-options', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{query: search}})
+                }});
+
+                if (!response.ok) {{
+                    setStatus("Autosave failed.");
+                    return;
+                }}
+
+                setStatus("Settings saved.");
+            }}
+
+            function checkForSettingsChange() {{
+                const search = window.location.search;
+                clearTimeout(saveTimer);
+                saveTimer = setTimeout(function() {{
+                    saveSearch(search).catch(function() {{
+                        setStatus("Autosave failed.");
+                    }});
+                }}, 500);
+            }}
+
+            window.addEventListener('popstate', checkForSettingsChange);
+            window.addEventListener('hashchange', checkForSettingsChange);
+            const originalPushState = history.pushState;
+            const originalReplaceState = history.replaceState;
+            history.pushState = function() {{
+                const result = originalPushState.apply(this, arguments);
+                checkForSettingsChange();
+                return result;
+            }};
+            history.replaceState = function() {{
+                const result = originalReplaceState.apply(this, arguments);
+                checkForSettingsChange();
+                return result;
+            }};
+
+            checkForSettingsChange();
+            setInterval(checkForSettingsChange, 1000);
+        }})();
+        </script>
+        """
+
+    return ""
+
+
+class PixletPreviewProxyHandler(BaseHTTPRequestHandler):
+    server_version = "MatrixPixletPreview/1.0"
+
+    def log_message(self, format, *args):
+        return
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/" and not current_app:
+            self.send_no_app_preview()
+            return
+        if parsed.path == "/" and current_app and not parsed.query:
+            saved_query = load_options().get(current_app, "")
+            if saved_query:
+                self.send_response(302)
+                self.send_header("Location", f"/?{saved_query}")
+                self.end_headers()
+                return
+
+        self.proxy_to_pixlet(inject_autosave=parsed.path == "/")
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/__save-options":
+            self.save_current_options()
+            return
+
+        self.proxy_to_pixlet()
+
+    def do_PUT(self):
+        self.proxy_to_pixlet()
+
+    def do_DELETE(self):
+        self.proxy_to_pixlet()
+
+    def send_no_app_preview(self):
+        content = no_app_preview_html().encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def save_current_options(self):
+        if not current_app:
+            self.send_json({"ok": False, "error": "No app is running"}, status=409)
+            return
+
+        length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(length) if length else b"{}"
+
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except json.JSONDecodeError:
+            self.send_json({"ok": False, "error": "Invalid JSON"}, status=400)
+            return
+
+        ok, result = save_options_for_app(current_app, payload.get("query", ""))
+        if not ok:
+            self.send_json({"ok": False, "error": result}, status=400)
+            return
+
+        self.send_json({"ok": True, "app": current_app, "options": result})
+
+    def send_json(self, payload, status=200):
+        content = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def proxy_to_pixlet(self, inject_autosave=False):
+        parsed = urlparse(self.path)
+        target_path = parsed.path
+
+        target_url = f"http://127.0.0.1:{PIXLET_INTERNAL_PORT}{target_path}"
+        if parsed.query:
+            target_url = f"{target_url}?{parsed.query}"
+
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length) if length else None
+        headers = {
+            key: value
+            for key, value in self.headers.items()
+            if key.lower() not in {"host", "content-length", "connection"}
+        }
+
+        try:
+            response = requests.request(
+                self.command,
+                target_url,
+                headers=headers,
+                data=body,
+                allow_redirects=False,
+                timeout=30,
+            )
+        except requests.RequestException as error:
+            content = f"Pixlet preview is not ready: {error}".encode("utf-8")
+            self.send_response(503)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+            return
+
+        content = response.content
+        content_type = response.headers.get("Content-Type", "")
+        if inject_autosave and "text/html" in content_type:
+            script = autosave_script().encode("utf-8")
+            if b"</body>" in content:
+                content = content.replace(b"</body>", script + b"</body>", 1)
+            else:
+                content += script
+
+        self.send_response(response.status_code)
+        for key, value in response.headers.items():
+            if key.lower() in {"content-length", "transfer-encoding", "connection", "content-encoding"}:
+                continue
+            self.send_header(key, value)
+
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+
+def start_preview_proxy():
+    global preview_proxy_server
+
+    preview_proxy_server = ThreadingHTTPServer(("0.0.0.0", int(PIXLET_PORT)), PixletPreviewProxyHandler)
+    thread = threading.Thread(target=preview_proxy_server.serve_forever, daemon=True)
+    thread.start()
 
 
 def restore_last_app():
@@ -408,15 +665,10 @@ def save_app_options():
     if not full_path.exists() or full_path.suffix != ".star":
         return "App not found", 404
 
-    options = load_options()
-    normalized = normalize_options(raw_options)
+    ok, error = save_options_for_app(app_path, raw_options)
+    if not ok:
+        return error, 400
 
-    if normalized:
-        options[app_path] = normalized
-    else:
-        options.pop(app_path, None)
-
-    save_options(options)
     return redirect(url_for("home"))
 
 
@@ -471,5 +723,6 @@ def stop_app():
 
 
 if __name__ == "__main__":
+    start_preview_proxy()
     restore_last_app()
     app.run(host="0.0.0.0", port=int(FLASK_PORT))
