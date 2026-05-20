@@ -1,0 +1,10 @@
+.git
+.agents
+.codex
+venv
+__pycache__
+*.pyc
+.pytest_cache
+data
+renders
+app_options.json

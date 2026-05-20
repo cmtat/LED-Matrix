@@ -7,23 +7,30 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 import os
 
 PUBLIC_HOST = os.environ.get("PUBLIC_HOST", "192.168.1.252")
+FLASK_PORT = os.environ.get("FLASK_PORT", "5050")
 PIXLET_PORT = os.environ.get("PIXLET_PORT", "8080")
 BROWSER_PIXLET_URL = os.environ.get(
     "BROWSER_PIXLET_URL",
     f"http://{PUBLIC_HOST}:{PIXLET_PORT}/"
 )
+ESP32_FRAME_URL = os.environ.get(
+    "ESP32_FRAME_URL",
+    f"http://{PUBLIC_HOST}:{FLASK_PORT}/frame.rgb565"
+)
+MATRIX_WIDTH = int(os.environ.get("MATRIX_WIDTH", "64"))
+MATRIX_HEIGHT = int(os.environ.get("MATRIX_HEIGHT", "32"))
+FRAME_BYTE_COUNT = MATRIX_WIDTH * MATRIX_HEIGHT * 2
 
 app = Flask(__name__)
 
-import os
-
-PUBLIC_HOST = os.environ.get("PUBLIC_HOST", "192.168.1.252")
-browser_pixlet_url = f"http://{PUBLIC_HOST}:8080/"
-
 BASE_DIR = Path(__file__).resolve().parent
 APPS_DIR = BASE_DIR / "apps"
-RENDER_DIR = BASE_DIR / "renders"
-OPTIONS_FILE = BASE_DIR / "app_options.json"
+DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR / "data"))
+RENDER_DIR = Path(os.environ.get("RENDER_DIR", BASE_DIR / "renders"))
+OPTIONS_FILE = DATA_DIR / "app_options.json"
+STATE_FILE = DATA_DIR / "state.json"
+LEGACY_OPTIONS_FILE = BASE_DIR / "app_options.json"
+DATA_DIR.mkdir(exist_ok=True)
 RENDER_DIR.mkdir(exist_ok=True)
 
 pixlet_process = None
@@ -55,7 +62,8 @@ PAGE = """
     <div class="status">
         <strong>Current app:</strong> {{ current_app or "None selected" }}<br>
         <strong>Pixlet preview:</strong> <a href="{{ browser_pixlet_url }}" target="_blank">Open Pixlet preview</a><br>
-        <strong>ESP32 frame endpoint:</strong> <a href="http://{{ host }}:5050/frame.rgb565" target="_blank">/frame.rgb565</a><br>
+        <strong>ESP32 frame endpoint:</strong> <a href="{{ esp32_frame_url }}" target="_blank">{{ esp32_frame_url }}</a><br>
+        <strong>ESP32 config:</strong> <a href="/esp32-config" target="_blank">/esp32-config</a><br>
         {% if current_app %}
             <img src="/frame.webp?cache={{ cache_bust }}" alt="Current rendered frame">
         {% endif %}
@@ -66,7 +74,7 @@ PAGE = """
                 Quick save settings for <strong>{{ current_app }}</strong> &mdash; paste the full URL (or just the <code>?…</code> part) from the Pixlet preview tab
             </label>
             <div style="display: flex; gap: 8px;">
-                <input name="options" value="{{ options_map.get(current_app, '') }}" placeholder="http://127.0.0.1:8080/?param=value&amp;…" style="flex: 1; margin-top: 0;">
+                <input name="options" value="{{ options_map.get(current_app, '') }}" placeholder="{{ browser_pixlet_url }}?param=value&amp;…" style="flex: 1; margin-top: 0;">
                 <button type="submit" style="width: auto; padding: 8px 16px; background: #2a7a4a; color: white; margin-top: 0;">Save Settings</button>
             </div>
         </form>
@@ -162,17 +170,26 @@ def find_apps():
 
 
 def load_options():
-    if not OPTIONS_FILE.exists():
+    options_file = OPTIONS_FILE if OPTIONS_FILE.exists() else LEGACY_OPTIONS_FILE
+
+    if not options_file.exists():
         return {}
 
     try:
-        return json.loads(OPTIONS_FILE.read_text())
+        return json.loads(options_file.read_text())
     except json.JSONDecodeError:
         return {}
 
 
 def save_options(options):
     OPTIONS_FILE.write_text(json.dumps(options, indent=2, sort_keys=True))
+
+
+def save_state():
+    if current_app:
+        STATE_FILE.write_text(json.dumps({"current_app": current_app}, indent=2))
+    elif STATE_FILE.exists():
+        STATE_FILE.unlink()
 
 
 def normalize_options(raw_options):
@@ -215,6 +232,45 @@ def stop_pixlet():
     pixlet_process = None
 
 
+def start_pixlet(full_path):
+    return subprocess.Popen(
+        ["pixlet", "serve", "--host", "0.0.0.0", "--port", PIXLET_PORT, str(full_path)],
+        cwd=BASE_DIR,
+    )
+
+
+def restore_last_app():
+    global pixlet_process, current_app, current_app_path
+
+    if not STATE_FILE.exists():
+        return
+
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except json.JSONDecodeError:
+        return
+
+    app_path = state.get("current_app")
+    if not app_path:
+        return
+
+    full_path = (APPS_DIR / app_path).resolve()
+    if not str(full_path).startswith(str(APPS_DIR.resolve())):
+        return
+
+    if not full_path.exists() or full_path.suffix != ".star":
+        return
+
+    try:
+        pixlet_process = start_pixlet(full_path)
+    except OSError as error:
+        print(f"Failed to restore Pixlet preview for {app_path}: {error}")
+        return
+
+    current_app = app_path
+    current_app_path = full_path
+
+
 def render_current_webp():
     if not current_app_path:
         return None, "No app selected"
@@ -243,11 +299,11 @@ def render_current_webp():
 
 
 def webp_to_rgb565(webp_file):
-    image = Image.open(webp_file).convert("RGB").resize((64, 32))
+    image = Image.open(webp_file).convert("RGB").resize((MATRIX_WIDTH, MATRIX_HEIGHT))
     data = bytearray()
 
-    for y in range(32):
-        for x in range(64):
+    for y in range(MATRIX_HEIGHT):
+        for x in range(MATRIX_WIDTH):
             r, g, b = image.getpixel((x, y))
             rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
             data.append((rgb565 >> 8) & 0xFF)
@@ -267,6 +323,7 @@ def home():
         host=host,
         current_preview_url=preview_url_for(host),
         browser_pixlet_url=BROWSER_PIXLET_URL,
+        esp32_frame_url=ESP32_FRAME_URL,
         options_map=options_map,
         cache_bust=f"{current_app}-{options_map.get(current_app, '')}",
     )
@@ -282,6 +339,20 @@ def preview_loader():
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "current_app": current_app, "saved_options": load_options().get(current_app, "")})
+
+
+@app.route("/esp32-config")
+def esp32_config():
+    return jsonify({
+        "frame_url": ESP32_FRAME_URL,
+        "width": MATRIX_WIDTH,
+        "height": MATRIX_HEIGHT,
+        "pixel_format": "rgb565",
+        "byte_order": "big_endian",
+        "frame_bytes": FRAME_BYTE_COUNT,
+        "refresh_ms": 1000,
+        "current_app": current_app,
+    })
 
 
 @app.route("/run", methods=["POST"])
@@ -302,13 +373,14 @@ def run_app():
 
     stop_pixlet()
 
-    pixlet_process = subprocess.Popen(
-        ["pixlet", "serve", str(full_path)],
-        cwd=BASE_DIR,
-    )
+    try:
+        pixlet_process = start_pixlet(full_path)
+    except OSError as error:
+        return f"Failed to start Pixlet: {error}", 500
 
     current_app = app_path
     current_app_path = full_path
+    save_state()
 
     host = request.host.split(":")[0]
     return render_template_string(
@@ -360,11 +432,32 @@ def frame_webp():
 @app.route("/frame.rgb565")
 def frame_rgb565():
     webp_file, error = render_current_webp()
+    if error and not current_app_path:
+        rgb565 = bytes(FRAME_BYTE_COUNT)
+        return Response(
+            rgb565,
+            mimetype="application/octet-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Matrix-Width": str(MATRIX_WIDTH),
+                "X-Matrix-Height": str(MATRIX_HEIGHT),
+                "X-Pixel-Format": "rgb565",
+            },
+        )
     if error:
         return error, 500
 
     rgb565 = webp_to_rgb565(webp_file)
-    return Response(rgb565, mimetype="application/octet-stream")
+    return Response(
+        rgb565,
+        mimetype="application/octet-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Matrix-Width": str(MATRIX_WIDTH),
+            "X-Matrix-Height": str(MATRIX_HEIGHT),
+            "X-Pixel-Format": "rgb565",
+        },
+    )
 
 
 @app.route("/stop", methods=["POST"])
@@ -373,8 +466,10 @@ def stop_app():
     stop_pixlet()
     current_app = None
     current_app_path = None
+    save_state()
     return redirect(url_for("home"))
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5050)
+    restore_last_app()
+    app.run(host="0.0.0.0", port=int(FLASK_PORT))
