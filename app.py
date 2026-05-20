@@ -47,74 +47,364 @@ PAGE = """
 <html>
 <head>
     <title>Matrix App Picker</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: Arial, sans-serif; margin: 40px; background: #111; color: #f5f5f5; }
-        h1 { margin-bottom: 10px; }
-        .status { margin-bottom: 25px; padding: 12px; background: #222; border-radius: 8px; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
-        .card { background: #222; padding: 14px; border-radius: 8px; }
-        button { width: 100%; padding: 10px; font-size: 15px; cursor: pointer; border: 0; border-radius: 6px; margin-top: 8px; }
-        input { width: 100%; box-sizing: border-box; padding: 8px; border-radius: 6px; border: 1px solid #444; background: #111; color: #f5f5f5; margin-top: 8px; }
-        label { display: block; font-size: 13px; color: #bbb; margin-top: 10px; }
-        .hint { font-size: 12px; color: #aaa; margin-top: 6px; line-height: 1.35; }
-        a { color: #8ab4ff; }
-        img { margin-top: 14px; image-rendering: pixelated; width: 256px; height: 128px; border: 1px solid #444; }
+        :root {
+            color-scheme: dark;
+            --bg: #0f1115;
+            --panel: #181b22;
+            --panel-soft: #20242d;
+            --line: #303642;
+            --text: #f4f6fb;
+            --muted: #a6adbb;
+            --accent: #35c28f;
+            --accent-strong: #21a976;
+            --link: #8db7ff;
+            --danger: #d75d5d;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            min-height: 100vh;
+        }
+
+        .shell {
+            width: min(1180px, calc(100% - 32px));
+            margin: 0 auto;
+            padding: 28px 0 40px;
+        }
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 28px;
+            font-weight: 760;
+            line-height: 1.1;
+        }
+
+        .subtle {
+            margin: 6px 0 0;
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        .status-dot {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            min-height: 34px;
+            padding: 0 12px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: var(--panel);
+            color: var(--muted);
+            font-size: 13px;
+            white-space: nowrap;
+        }
+
+        .status-dot::before {
+            content: "";
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: {% if current_app %}var(--accent){% else %}#687080{% endif %};
+        }
+
+        .hero {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 18px;
+            align-items: stretch;
+            padding: 18px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--panel);
+            margin-bottom: 22px;
+        }
+
+        .current {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            gap: 18px;
+            min-width: 0;
+        }
+
+        .eyebrow {
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }
+
+        .current-title {
+            margin: 8px 0 0;
+            font-size: 22px;
+            font-weight: 720;
+            overflow-wrap: anywhere;
+        }
+
+        .links {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        a, button {
+            font: inherit;
+        }
+
+        a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        .button, button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 38px;
+            padding: 0 14px;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            background: var(--accent);
+            color: #04150f;
+            font-weight: 700;
+            cursor: pointer;
+            text-decoration: none;
+            white-space: nowrap;
+        }
+
+        .button:hover {
+            text-decoration: none;
+            background: var(--accent-strong);
+        }
+
+        .button.secondary {
+            background: var(--panel-soft);
+            color: var(--text);
+            border-color: var(--line);
+        }
+
+        .button.secondary:hover {
+            background: #262b35;
+        }
+
+        .button.danger {
+            background: transparent;
+            color: #ffaaaa;
+            border-color: #6e3434;
+        }
+
+        .button.danger:hover {
+            background: #2b1719;
+        }
+
+        .frame-preview {
+            width: 256px;
+            min-height: 128px;
+            display: grid;
+            place-items: center;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: #090a0d;
+            overflow: hidden;
+        }
+
+        .frame-preview img {
+            display: block;
+            image-rendering: pixelated;
+            width: 256px;
+            height: 128px;
+        }
+
+        .empty-frame {
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .section-head {
+            display: flex;
+            align-items: end;
+            justify-content: space-between;
+            gap: 16px;
+            margin: 24px 0 12px;
+        }
+
+        h2 {
+            margin: 0;
+            font-size: 18px;
+        }
+
+        .count {
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 12px;
+        }
+
+        .card {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            gap: 16px;
+            min-height: 132px;
+            padding: 14px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--panel);
+        }
+
+        .card.active {
+            border-color: rgba(53, 194, 143, .8);
+        }
+
+        .app-name {
+            font-weight: 720;
+            line-height: 1.25;
+            overflow-wrap: anywhere;
+        }
+
+        .app-meta {
+            margin-top: 7px;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .card-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .card-actions form {
+            flex: 1;
+        }
+
+        .card-actions button,
+        .card-actions .button {
+            width: 100%;
+        }
+
+        @media (max-width: 720px) {
+            .shell {
+                width: min(100% - 20px, 1180px);
+                padding-top: 18px;
+            }
+
+            .topbar, .section-head {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
+            .hero {
+                grid-template-columns: 1fr;
+            }
+
+            .frame-preview {
+                width: 100%;
+                aspect-ratio: 2 / 1;
+            }
+
+            .frame-preview img {
+                width: 100%;
+                height: 100%;
+            }
+        }
     </style>
 </head>
 <body>
-    <h1>Matrix App Picker</h1>
-
-    <div class="status">
-        <strong>Current app:</strong> {{ current_app or "None selected" }}<br>
-        <strong>Pixlet preview:</strong> <a href="{{ browser_pixlet_url }}" target="_blank">Open Pixlet preview</a><br>
-        <strong>ESP32 frame endpoint:</strong> <a href="{{ esp32_frame_url }}" target="_blank">{{ esp32_frame_url }}</a><br>
-        <strong>ESP32 config:</strong> <a href="/esp32-config" target="_blank">/esp32-config</a><br>
-        {% if current_app %}
-            <img src="/frame.webp?cache={{ cache_bust }}" alt="Current rendered frame">
-        {% endif %}
-        {% if current_app %}
-        <form method="post" action="/save-options" style="margin-top: 14px;">
-            <input type="hidden" name="app_path" value="{{ current_app }}">
-            <label style="font-size: 13px; color: #bbb; display: block; margin-bottom: 4px;">
-                Quick save settings for <strong>{{ current_app }}</strong> &mdash; paste the full URL (or just the <code>?…</code> part) from the Pixlet preview tab
-            </label>
-            <div style="display: flex; gap: 8px;">
-                <input name="options" value="{{ options_map.get(current_app, '') }}" placeholder="{{ browser_pixlet_url }}?param=value&amp;…" style="flex: 1; margin-top: 0;">
-                <button type="submit" style="width: auto; padding: 8px 16px; background: #2a7a4a; color: white; margin-top: 0;">Save Settings</button>
+    <main class="shell">
+        <header class="topbar">
+            <div>
+                <h1>Matrix App Picker</h1>
+                <p class="subtle">Choose what your LED matrix shows next.</p>
             </div>
-        </form>
-        {% else %}
-        <div class="hint">
-            Run an app, then paste its Pixlet preview URL here to save settings.
+            <div class="status-dot">{{ "Running" if current_app else "Idle" }}</div>
+        </header>
+
+        <section class="hero">
+            <div class="current">
+                <div>
+                    <div class="eyebrow">Current app</div>
+                    <div class="current-title">{{ current_app or "Nothing selected" }}</div>
+                </div>
+
+                <div class="links">
+                    <a class="button" href="{{ browser_pixlet_url }}" target="_blank">Open Preview</a>
+                    <a class="button secondary" href="{{ esp32_frame_url }}" target="_blank">Frame Endpoint</a>
+                    <a class="button secondary" href="/esp32-config" target="_blank">ESP32 Config</a>
+                    {% if current_app %}
+                    <form method="post" action="/stop">
+                        <button class="button danger" type="submit">Stop</button>
+                    </form>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="frame-preview">
+                {% if current_app %}
+                    <img src="/frame.webp?cache={{ cache_bust }}" alt="Current rendered frame">
+                {% else %}
+                    <div class="empty-frame">64 x 32 preview</div>
+                {% endif %}
+            </div>
+        </section>
+
+        <div class="section-head">
+            <h2>Apps</h2>
+            <div class="count">{{ app_files|length }} available</div>
         </div>
-        {% endif %}
-    </div>
 
-    <div class="grid">
-        {% for app_file in app_files %}
-        <div class="card">
-            <strong>{{ app_file }}</strong>
+        <section class="grid">
+            {% for app_file in app_files %}
+            <article class="card {% if app_file == current_app %}active{% endif %}">
+                <div>
+                    <div class="app-name">{{ app_file }}</div>
+                    <div class="app-meta">
+                        {% if app_file == current_app %}
+                            Running now
+                        {% elif options_map.get(app_file) %}
+                            Saved settings
+                        {% else %}
+                            Default settings
+                        {% endif %}
+                    </div>
+                </div>
 
-            <form method="post" action="/run" onsubmit="window.open('/preview-loader?app_path=' + encodeURIComponent(this.app_path.value), '_blank');">
-                <input type="hidden" name="app_path" value="{{ app_file }}">
-                <button type="submit">Run App</button>
-            </form>
-
-            <form method="post" action="/save-options">
-                <input type="hidden" name="app_path" value="{{ app_file }}">
-                <label>Saved options</label>
-                <input name="options" value="{{ options_map.get(app_file, '') }}" placeholder="Example: city=Fort%20Worth&units=imperial">
-                <button type="submit">Save Options</button>
-            </form>
-
-            {% if options_map.get(app_file) %}
-                <div class="hint">Saved: {{ options_map.get(app_file) }}</div>
-            {% else %}
-                <div class="hint">No saved options yet.</div>
-            {% endif %}
-        </div>
-        {% endfor %}
-    </div>
+                <div class="card-actions">
+                    <form method="post" action="/run" onsubmit="window.open('/preview-loader?app_path=' + encodeURIComponent(this.app_path.value), '_blank');">
+                        <input type="hidden" name="app_path" value="{{ app_file }}">
+                        <button type="submit">{{ "Restart" if app_file == current_app else "Run" }}</button>
+                    </form>
+                    {% if app_file == current_app %}
+                    <a class="button secondary" href="{{ browser_pixlet_url }}" target="_blank">Preview</a>
+                    {% endif %}
+                </div>
+            </article>
+            {% endfor %}
+        </section>
+    </main>
 </body>
 </html>
 """
