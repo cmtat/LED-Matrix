@@ -589,7 +589,7 @@ def autosave_script():
                 document.body.appendChild(statusEl);
             }});
 
-            let lastSavedSearch = "";
+            let lastSavedSearch = null;
             let saveTimer = null;
 
             function setStatus(message) {{
@@ -597,7 +597,7 @@ def autosave_script():
             }}
 
             async function saveSearch(search) {{
-                if (!search || search === "?" || search === lastSavedSearch) {{
+                if (search === "?" || search === lastSavedSearch) {{
                     return;
                 }}
 

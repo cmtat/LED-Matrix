@@ -16,17 +16,17 @@ DEFAULT_BG_COLOR = "#000000"
 DEFAULT_ACCENT_COLOR = "#0af"
 
 def main(config):
-    message = config.get("message", DEFAULT_MESSAGE)
+    message = config.str("message", DEFAULT_MESSAGE)
     if message == None or message == "":
         message = DEFAULT_MESSAGE
 
-    mode = config.get("mode", "scroll")
-    text_color = config.get("text_color", DEFAULT_TEXT_COLOR)
-    bg_color = config.get("bg_color", DEFAULT_BG_COLOR)
-    accent_color = config.get("accent_color", DEFAULT_ACCENT_COLOR)
-    speed = config.get("speed", "medium")
-    uppercase = config.get("uppercase", True)
-    show_border = config.get("show_border", True)
+    mode = config.str("mode", "scroll")
+    text_color = config.str("text_color", DEFAULT_TEXT_COLOR)
+    bg_color = config.str("bg_color", DEFAULT_BG_COLOR)
+    accent_color = config.str("accent_color", DEFAULT_ACCENT_COLOR)
+    speed = config.str("speed", "medium")
+    uppercase = config.bool("uppercase", True)
+    show_border = config.bool("show_border", True)
 
     if uppercase:
         message = message.upper()
