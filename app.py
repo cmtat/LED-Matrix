@@ -7,7 +7,10 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 
 app = Flask(__name__)
 
-BROWSER_PIXLET_URL = "http://127.0.0.1:8080/"
+import os
+
+PUBLIC_HOST = os.environ.get("PUBLIC_HOST", "192.168.1.252")
+browser_pixlet_url = f"http://{PUBLIC_HOST}:8080/"
 
 BASE_DIR = Path(__file__).resolve().parent
 APPS_DIR = BASE_DIR / "apps"
