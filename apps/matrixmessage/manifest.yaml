@@ -1,0 +1,8 @@
+---
+id: matrix-message
+name: Matrix Message
+summary: Custom message display
+desc: Write your own text and choose colors, motion, and border style for the LED matrix.
+author: Carter
+fileName: matrix_message.star
+packageName: matrixmessage
