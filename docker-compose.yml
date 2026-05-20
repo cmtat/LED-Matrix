@@ -1,0 +1,7 @@
+services:
+  matrix-v2:
+    build: .
+    container_name: matrix-v2
+    ports:
+      - "5050:5050"
+    restart: unless-stopped

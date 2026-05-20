@@ -1,0 +1,5 @@
+{
+  "Death Clock/death_clock.star": "cache=1779220367385&birth_year=1997&birth_month=3&birth_day=11&gender=male",
+  "dateprogress/date_progress.star": "location=%7B%22lat%22%3A%2232.901%22%2C%22lng%22%3A%22-97.416%22%2C%22locality%22%3A%22Fort+Worth%2C+Texas%22%2C%22timezone%22%3A%22America%2FChicago%22%7D&cache=1779222400111&show_day=true&show_month=true&show_year=true&show_labels=true&show_values=true&color_year=%230ff&color_month=%230f0&color_day=%23f00&start_hour=0&start_minute=0&end_hour=0&end_minute=0",
+  "datetimeclock/date_time_clock.star": "cache=1779222330588&location=%7B%22lat%22%3A%2232.901%22%2C%22lng%22%3A%22-97.416%22%2C%22locality%22%3A%22Fort+Worth%2C+Texas%22%2C%22timezone%22%3A%22America%2FChicago%22%7D&is_24_hour_format=false&is_us_date_format=true"
+}

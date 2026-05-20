@@ -1,0 +1,8 @@
+---
+id: death-clock
+name: Death Clock
+summary: Countdown to your death
+desc: Shows a live countdown in seconds of how long you have left to live based on your birthday and gender using average US life expectancy data.
+author: carter
+fileName: death_clock.star
+packageName: deathclock
