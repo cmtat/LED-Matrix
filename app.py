@@ -882,7 +882,7 @@ def restore_last_app():
 
 def render_current_webp(output_file=None):
     if not current_app_path:
-        return None, "No app selected"
+        return None, None, None, "No app selected"
 
     if output_file is None:
         output_file = RENDER_DIR / f"current-{int(time.time() * 1000)}-{threading.get_ident()}.webp"
@@ -890,6 +890,8 @@ def render_current_webp(output_file=None):
     options = load_options()
     pixlet_args = options_to_pixlet_args(options.get(current_app, ""))
 
+    render_started_monotonic = time.monotonic()
+    render_started_wall = time.time()
     result = subprocess.run(
         ["pixlet", "render", str(current_app_path), *pixlet_args, "-o", str(output_file)],
         cwd=BASE_DIR,
@@ -898,12 +900,12 @@ def render_current_webp(output_file=None):
     )
 
     if result.returncode != 0:
-        return None, result.stderr
+        return None, None, None, result.stderr
 
     if not output_file.exists():
-        return None, "Pixlet rendered, but current.webp was not created"
+        return None, None, None, "Pixlet rendered, but current.webp was not created"
 
-    return output_file, None
+    return output_file, render_started_monotonic, render_started_wall, None
 
 
 def cache_key_without_refresh_bucket(key):
@@ -1063,7 +1065,7 @@ def ensure_frame_cache_is_fresh():
 
 
 def refresh_frame_cache_for_key(key):
-    webp_file, error = render_current_webp()
+    webp_file, render_started_monotonic, render_started_wall, error = render_current_webp()
     if error:
         with frame_cache_lock:
             frame_cache["error_key"] = key
@@ -1071,6 +1073,12 @@ def refresh_frame_cache_for_key(key):
         return error
 
     frames, rgb_frames, durations, metadata = webp_to_rgb565_frames(webp_file)
+    playback_started_at = time.monotonic()
+    rendered_at = time.time()
+    app_name = key[0] if key else None
+    if LIVE_RENDER_APP_REFRESH_SECONDS.get(app_name):
+        playback_started_at = render_started_monotonic
+        rendered_at = render_started_wall
 
     with frame_cache_lock:
         if current_frame_cache_key() != key:
@@ -1080,8 +1088,8 @@ def refresh_frame_cache_for_key(key):
         frame_cache["rgb_frames"] = rgb_frames
         frame_cache["durations"] = durations
         frame_cache["total_duration"] = sum(durations)
-        frame_cache["started_at"] = time.monotonic()
-        frame_cache["rendered_at"] = time.time()
+        frame_cache["started_at"] = playback_started_at
+        frame_cache["rendered_at"] = rendered_at
         frame_cache["key"] = key
         frame_cache["error_key"] = None
         frame_cache["error"] = None
