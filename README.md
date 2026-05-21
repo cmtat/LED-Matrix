@@ -42,6 +42,8 @@ The endpoints return a blank frame until an app is selected, so the ESP32 can bo
 
 The ESP32 can also fetch `/esp32-config` to discover the frame URL, stream URL, dimensions, pixel format, byte order, and suggested refresh interval.
 
+To inspect the server-side animation extraction, open `/debug/frames`. It exports the currently cached full-canvas PNG frames to `renders/debug_frames/frame_000.png`, `frame_001.png`, and so on, and returns frame metadata including source size, tile/update extents, duration, disposal, and blend fields.
+
 ## Portainer Deploy
 
 Use the included `docker-compose.yml`. It uses host networking so Flask and Pixlet bind directly on the ZimaOS host:

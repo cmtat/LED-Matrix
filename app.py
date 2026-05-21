@@ -5,7 +5,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from PIL import Image, ImageSequence
+from PIL import Image
 from urllib.parse import parse_qsl, urlencode, urlparse
 import os
 import requests
@@ -47,6 +47,7 @@ current_app_path = None
 frame_cache_lock = threading.RLock()
 frame_cache = {
     "frames": [bytes(FRAME_BYTE_COUNT)],
+    "rgb_frames": [],
     "durations": [1000],
     "total_duration": 1000,
     "started_at": time.monotonic(),
@@ -55,6 +56,7 @@ frame_cache = {
     "error_key": None,
     "error": None,
     "webp_file": None,
+    "metadata": [],
 }
 
 PAGE = """
@@ -543,6 +545,7 @@ def current_frame_cache_key():
 def reset_frame_cache():
     with frame_cache_lock:
         frame_cache["frames"] = [bytes(FRAME_BYTE_COUNT)]
+        frame_cache["rgb_frames"] = []
         frame_cache["durations"] = [1000]
         frame_cache["total_duration"] = 1000
         frame_cache["started_at"] = time.monotonic()
@@ -551,6 +554,7 @@ def reset_frame_cache():
         frame_cache["error_key"] = None
         frame_cache["error"] = None
         frame_cache["webp_file"] = None
+        frame_cache["metadata"] = []
 
 
 def preview_url_for(host=None, app_name=None):
@@ -887,6 +891,101 @@ def render_current_webp():
     return output_file, None
 
 
+def tile_extents(frame):
+    extents = []
+    for tile in getattr(frame, "tile", []) or []:
+        box = getattr(tile, "extents", None)
+        if box is None and len(tile) > 1:
+            box = tile[1]
+        if box:
+            extents.append(tuple(int(value) for value in box))
+    return extents
+
+
+def normalized_update_box(frame, canvas_size):
+    boxes = tile_extents(frame)
+    if not boxes:
+        return (0, 0) + canvas_size
+
+    left = min(box[0] for box in boxes)
+    top = min(box[1] for box in boxes)
+    right = max(box[2] for box in boxes)
+    bottom = max(box[3] for box in boxes)
+    width, height = canvas_size
+
+    update_box = (
+        max(0, min(left, width)),
+        max(0, min(top, height)),
+        max(0, min(right, width)),
+        max(0, min(bottom, height)),
+    )
+
+    if update_box[2] <= update_box[0] or update_box[3] <= update_box[1]:
+        return (0, 0) + canvas_size
+
+    return update_box
+
+
+def frame_metadata(image, frame, index, update_box):
+    disposal = getattr(frame, "disposal_method", None)
+    if disposal is None:
+        disposal = frame.info.get("disposal")
+    blend = getattr(frame, "blend", frame.info.get("blend"))
+
+    return {
+        "index": index,
+        "source_size": list(image.size),
+        "frame_size": list(frame.size),
+        "mode": frame.mode,
+        "duration_ms": int(frame.info.get("duration", 33) or 33),
+        "timestamp": frame.info.get("timestamp"),
+        "tile_extents": [list(box) for box in tile_extents(frame)],
+        "update_box": list(update_box),
+        "disposal": None if disposal is None else str(disposal),
+        "blend": None if blend is None else str(blend),
+    }
+
+
+def composited_animation_frames(image):
+    canvas_size = image.size
+    background = Image.new("RGBA", canvas_size, image.info.get("background", (0, 0, 0, 0)))
+    canvas = background.copy()
+    rgb_frames = []
+    durations = []
+    metadata = []
+    frame_count = getattr(image, "n_frames", 1)
+
+    for index in range(frame_count):
+        image.seek(index)
+        update_box = normalized_update_box(image, canvas_size)
+        frame_rgba = image.copy().convert("RGBA")
+
+        if frame_rgba.size == canvas_size:
+            if update_box == (0, 0) + canvas_size:
+                update = frame_rgba
+                paste_box = (0, 0)
+            else:
+                update = frame_rgba.crop(update_box)
+                paste_box = update_box[:2]
+        else:
+            update = frame_rgba
+            paste_box = update_box[:2]
+
+        canvas.alpha_composite(update, dest=paste_box)
+        rgb_frames.append(canvas.convert("RGB").resize((MATRIX_WIDTH, MATRIX_HEIGHT)))
+
+        duration = int(image.info.get("duration", frame_rgba.info.get("duration", 33)) or 33)
+        durations.append(max(duration, 1))
+        metadata.append(frame_metadata(image, image, index, update_box))
+
+    if not rgb_frames:
+        rgb_frames = [Image.new("RGB", (MATRIX_WIDTH, MATRIX_HEIGHT))]
+        durations = [1000]
+        metadata = []
+
+    return rgb_frames, durations, metadata
+
+
 def image_to_rgb565(image):
     image = image.convert("RGB").resize((MATRIX_WIDTH, MATRIX_HEIGHT))
     data = bytearray()
@@ -903,19 +1002,14 @@ def image_to_rgb565(image):
 
 def webp_to_rgb565_frames(webp_file):
     image = Image.open(webp_file)
-    frames = []
-    durations = []
-
-    for frame in ImageSequence.Iterator(image):
-        frames.append(image_to_rgb565(frame.copy()))
-        duration = int(frame.info.get("duration", 33) or 33)
-        durations.append(max(duration, 1))
+    rgb_frames, durations, metadata = composited_animation_frames(image)
+    frames = [image_to_rgb565(frame) for frame in rgb_frames]
 
     if not frames:
         frames = [bytes(FRAME_BYTE_COUNT)]
         durations = [1000]
 
-    return frames, durations
+    return frames, rgb_frames, durations, metadata
 
 
 def ensure_frame_cache_is_fresh():
@@ -939,8 +1033,9 @@ def ensure_frame_cache_is_fresh():
             frame_cache["error"] = error
             raise RuntimeError(error)
 
-        frames, durations = webp_to_rgb565_frames(webp_file)
+        frames, rgb_frames, durations, metadata = webp_to_rgb565_frames(webp_file)
         frame_cache["frames"] = frames
+        frame_cache["rgb_frames"] = rgb_frames
         frame_cache["durations"] = durations
         frame_cache["total_duration"] = sum(durations)
         frame_cache["started_at"] = time.monotonic()
@@ -949,6 +1044,7 @@ def ensure_frame_cache_is_fresh():
         frame_cache["error_key"] = None
         frame_cache["error"] = None
         frame_cache["webp_file"] = webp_file
+        frame_cache["metadata"] = metadata
 
 
 def current_rgb565_frame():
@@ -1106,6 +1202,50 @@ def frame_webp():
         return "No app selected", 500
 
     return send_file(webp_file, mimetype="image/webp")
+
+
+@app.route("/debug/frames")
+def debug_frames():
+    try:
+        ensure_frame_cache_is_fresh()
+    except RuntimeError as error:
+        return jsonify({"ok": False, "error": str(error)}), 500
+
+    debug_dir = RENDER_DIR / "debug_frames"
+    debug_dir.mkdir(exist_ok=True)
+    for old_frame in debug_dir.glob("frame_*.png"):
+        old_frame.unlink()
+
+    with frame_cache_lock:
+        rgb_frames = [frame.copy() for frame in frame_cache["rgb_frames"]]
+        metadata = list(frame_cache["metadata"])
+        durations = list(frame_cache["durations"])
+        total_duration = frame_cache["total_duration"]
+        rendered_at = frame_cache["rendered_at"]
+        webp_file = frame_cache["webp_file"]
+
+    if not rgb_frames:
+        rgb_frames = [Image.new("RGB", (MATRIX_WIDTH, MATRIX_HEIGHT))]
+        durations = [1000]
+        total_duration = 1000
+
+    frame_paths = []
+    for index, frame in enumerate(rgb_frames):
+        output_file = debug_dir / f"frame_{index:03d}.png"
+        frame.save(output_file)
+        frame_paths.append(str(output_file.relative_to(BASE_DIR)))
+
+    return jsonify({
+        "ok": True,
+        "frame_count": len(rgb_frames),
+        "durations_ms": durations,
+        "total_duration_ms": total_duration,
+        "rendered_at": rendered_at,
+        "webp_file": str(webp_file.relative_to(BASE_DIR)) if webp_file else None,
+        "debug_dir": str(debug_dir.relative_to(BASE_DIR)),
+        "frames": frame_paths,
+        "metadata": metadata,
+    })
 
 
 @app.route("/frame.rgb565")
