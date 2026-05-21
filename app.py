@@ -912,6 +912,22 @@ def cache_key_without_refresh_bucket(key):
     return key[:-1] if key else None
 
 
+def is_live_render_key(key):
+    app_name = key[0] if key else None
+    return bool(LIVE_RENDER_APP_REFRESH_SECONDS.get(app_name))
+
+
+def should_refresh_live_render(key, started_at, total_duration):
+    if not is_live_render_key(key) or total_duration <= 0:
+        return False
+
+    app_name = key[0]
+    refresh_seconds = LIVE_RENDER_APP_REFRESH_SECONDS[app_name]
+    refresh_after_ms = min(refresh_seconds * 500, max(total_duration // 2, 1))
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    return elapsed_ms >= refresh_after_ms
+
+
 def tile_extents(frame):
     extents = []
     for tile in getattr(frame, "tile", []) or []:
@@ -1043,6 +1059,8 @@ def ensure_frame_cache_is_fresh():
             return
 
         if frame_cache["key"] == key and frame_cache["frames"]:
+            if should_refresh_live_render(key, frame_cache["started_at"], frame_cache["total_duration"]):
+                start_background_frame_render(key)
             return
 
         cached_key = frame_cache["key"]
@@ -1075,8 +1093,7 @@ def refresh_frame_cache_for_key(key):
     frames, rgb_frames, durations, metadata = webp_to_rgb565_frames(webp_file)
     playback_started_at = time.monotonic()
     rendered_at = time.time()
-    app_name = key[0] if key else None
-    if LIVE_RENDER_APP_REFRESH_SECONDS.get(app_name):
+    if is_live_render_key(key):
         playback_started_at = render_started_monotonic
         rendered_at = render_started_wall
 
@@ -1127,11 +1144,16 @@ def current_rgb565_frame():
         durations = frame_cache["durations"]
         total = frame_cache["total_duration"]
         started_at = frame_cache["started_at"]
+        key = frame_cache["key"]
 
         if len(frames) == 1 or total <= 0:
             return frames[0]
 
-        elapsed_ms = int((time.monotonic() - started_at) * 1000) % total
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        if is_live_render_key(key):
+            elapsed_ms = min(elapsed_ms, total - 1)
+        else:
+            elapsed_ms = elapsed_ms % total
 
         running = 0
         for frame, duration in zip(frames, durations):
