@@ -415,7 +415,7 @@ PAGE = """
                 </div>
 
                 <div class="card-actions">
-                    <form method="post" action="/run" onsubmit="window.open('/preview-loader?app_path=' + encodeURIComponent(this.app_path.value), '_blank');">
+                    <form method="post" action="/run">
                         <input type="hidden" name="app_path" value="{{ app_file }}">
                         <button type="submit">{{ "Restart" if app_file == current_app else "Run" }}</button>
                     </form>
@@ -427,30 +427,6 @@ PAGE = """
             {% endfor %}
         </section>
     </main>
-</body>
-</html>
-"""
-
-RUNNING_PAGE = """
-<!doctype html>
-<html>
-<head>
-    <title>Starting Pixlet App</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 40px; background: #111; color: #f5f5f5; }
-        a { color: #8ab4ff; }
-    </style>
-</head>
-<body>
-    <h1>Starting {{ app_name }}</h1>
-    <p>A new Pixlet preview tab should open automatically.</p>
-    <p><a href="{{ browser_pixlet_url }}" target="_blank">Open Pixlet preview manually</a></p>
-
-    <script>
-        setTimeout(function() {
-            window.location.href = '/';
-        }, 800);
-    </script>
 </body>
 </html>
 """
@@ -1246,14 +1222,7 @@ def run_app():
     reset_frame_cache()
     save_state()
 
-    host = request.host.split(":")[0]
-    return render_template_string(
-        RUNNING_PAGE,
-        app_name=app_display_name(app_path),
-        host=host,
-        preview_url=preview_url_for(host, app_path),
-        browser_pixlet_url=BROWSER_PIXLET_URL,
-    )
+    return redirect(url_for("home"))
 
 
 @app.route("/save-options", methods=["POST"])
