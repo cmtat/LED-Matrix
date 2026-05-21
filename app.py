@@ -9,6 +9,7 @@ from PIL import Image
 from urllib.parse import parse_qsl, urlencode, urlparse
 import os
 import requests
+import socket
 
 PUBLIC_HOST = os.environ.get("PUBLIC_HOST", "192.168.1.252")
 FLASK_PORT = os.environ.get("FLASK_PORT", "5050")
@@ -30,6 +31,7 @@ TARGET_STREAM_FRAME_MS = 1000 / TARGET_STREAM_FPS
 TARGET_STREAM_FRAME_SECONDS = TARGET_STREAM_FRAME_MS / 1000
 STREAM_SPIKE_LOG_MS = float(os.environ.get("STREAM_SPIKE_LOG_MS", "50"))
 STREAM_STATS_LOG_SECONDS = float(os.environ.get("STREAM_STATS_LOG_SECONDS", "5"))
+STREAM_SOCKET_SNDBUF = int(os.environ.get("STREAM_SOCKET_SNDBUF", "262144"))
 
 app = Flask(__name__)
 
@@ -72,6 +74,9 @@ latest_frame = {
     "error": None,
 }
 frame_producer_thread = None
+runtime_services_lock = threading.Lock()
+runtime_services_started = False
+CONSTANT_TEST_FRAME = bytes(FRAME_BYTE_COUNT)
 
 LIVE_RENDER_APP_REFRESH_SECONDS = {
     "Death Clock/death_clock.star": 60,
@@ -1246,6 +1251,153 @@ def latest_frame_producer_loop():
             next_tick = time.monotonic()
 
 
+def stream_socket_from_environ(environ):
+    for key in ("gunicorn.socket", "werkzeug.socket"):
+        sock = environ.get(key)
+        if sock is not None:
+            return key, sock
+    return None, None
+
+
+def configure_stream_socket(environ, remote_addr, stream_name):
+    socket_key, sock = stream_socket_from_environ(environ)
+    result = {
+        "socket_key": socket_key or "-",
+        "tcp_nodelay": "unavailable",
+        "sndbuf": "unavailable",
+    }
+
+    if sock is None:
+        print(
+            f"{stream_name} socket options unavailable: remote={remote_addr} "
+            "socket_key=- wsgi_server_socket=not-exposed",
+            flush=True,
+        )
+        return result
+
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        result["tcp_nodelay"] = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+    except OSError as error:
+        result["tcp_nodelay"] = f"error:{error.__class__.__name__}:{error}"
+
+    if STREAM_SOCKET_SNDBUF > 0:
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, STREAM_SOCKET_SNDBUF)
+            result["sndbuf"] = sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+        except OSError as error:
+            result["sndbuf"] = f"error:{error.__class__.__name__}:{error}"
+    else:
+        try:
+            result["sndbuf"] = sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+        except OSError as error:
+            result["sndbuf"] = f"error:{error.__class__.__name__}:{error}"
+
+    print(
+        f"{stream_name} socket options: remote={remote_addr} "
+        f"socket_key={result['socket_key']} tcp_nodelay={result['tcp_nodelay']} "
+        f"sndbuf={result['sndbuf']} direct_passthrough=true middleware=none",
+        flush=True,
+    )
+    return result
+
+
+def stream_full_frames(stream_name, frame_provider, include_producer_stats=False):
+    remote_addr = request.remote_addr
+    user_agent = request.headers.get("User-Agent", "-")
+    socket_options = configure_stream_socket(request.environ, remote_addr, stream_name)
+
+    def generate():
+        next_tick = time.monotonic()
+        last_sent_at = None
+        last_stats_log = time.monotonic()
+        sent_frames = 0
+        worst_write_flush_ms = 0.0
+        worst_interval_ms = 0.0
+        spike_count = 0
+
+        print(
+            f"{stream_name} connected: remote={remote_addr} user_agent={user_agent} "
+            f"socket_key={socket_options['socket_key']}",
+            flush=True,
+        )
+
+        try:
+            while True:
+                frame, details = frame_provider()
+                frame_started = time.monotonic()
+                stream_interval_ms = 0.0 if last_sent_at is None else (frame_started - last_sent_at) * 1000
+                last_sent_at = frame_started
+
+                yield frame
+
+                flushed_at = time.monotonic()
+                write_flush_ms = (flushed_at - frame_started) * 1000
+                sent_frames += 1
+                worst_write_flush_ms = max(worst_write_flush_ms, write_flush_ms)
+                worst_interval_ms = max(worst_interval_ms, stream_interval_ms)
+                is_spike = write_flush_ms > STREAM_SPIKE_LOG_MS or stream_interval_ms > STREAM_SPIKE_LOG_MS
+                if is_spike:
+                    spike_count += 1
+                    print(
+                        f"{stream_name} spike: remote={remote_addr} "
+                        f"write_flush_ms={write_flush_ms:.2f} "
+                        f"stream_interval_ms={stream_interval_ms:.2f} "
+                        f"{details}",
+                        flush=True,
+                    )
+
+                now = time.monotonic()
+                if now - last_stats_log >= STREAM_STATS_LOG_SECONDS:
+                    producer_suffix = f" {details}" if include_producer_stats else ""
+                    print(
+                        f"{stream_name} stats: remote={remote_addr} frames={sent_frames} "
+                        f"last_write_flush_ms={write_flush_ms:.2f} "
+                        f"worst_write_flush_ms={worst_write_flush_ms:.2f} "
+                        f"last_stream_interval_ms={stream_interval_ms:.2f} "
+                        f"worst_stream_interval_ms={worst_interval_ms:.2f} "
+                        f"spikes={spike_count}{producer_suffix}",
+                        flush=True,
+                    )
+                    last_stats_log = now
+                    sent_frames = 0
+                    worst_write_flush_ms = 0.0
+                    worst_interval_ms = 0.0
+                    spike_count = 0
+
+                next_tick += TARGET_STREAM_FRAME_SECONDS
+                sleep_for = next_tick - time.monotonic()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                else:
+                    next_tick = time.monotonic()
+        except GeneratorExit:
+            print(f"{stream_name} disconnected: remote={remote_addr} reason=generator_exit", flush=True)
+            raise
+        except (BrokenPipeError, ConnectionResetError) as error:
+            print(
+                f"{stream_name} write exception: remote={remote_addr} "
+                f"exception={error.__class__.__name__} message={error}",
+                flush=True,
+            )
+            raise
+        except OSError as error:
+            print(
+                f"{stream_name} socket exception: remote={remote_addr} "
+                f"exception={error.__class__.__name__} errno={getattr(error, 'errno', '-')} "
+                f"message={error}",
+                flush=True,
+            )
+            raise
+
+    return Response(
+        stream_with_context(generate()),
+        content_type="application/octet-stream",
+        headers=rgb565_response_headers(),
+        direct_passthrough=True,
+    )
+
+
 def rgb565_response_headers():
     return {
         "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
@@ -1434,83 +1586,25 @@ def frame_rgb565():
 def stream_rgb565():
     ensure_frame_producer_running()
 
-    def generate():
-        next_tick = time.monotonic()
-        last_sent_at = None
-        last_stats_log = time.monotonic()
-        sent_frames = 0
-        worst_write_flush_ms = 0.0
-        worst_interval_ms = 0.0
-        spike_count = 0
+    def latest_frame_provider():
+        frame, sequence, prepared_at, render_ms, producer_interval_ms, error = latest_rgb565_frame_snapshot()
+        frame_age_ms = (time.monotonic() - prepared_at) * 1000
+        details = (
+            f"seq={sequence} producer_render_ms={render_ms:.2f} "
+            f"producer_interval_ms={producer_interval_ms:.2f} "
+            f"frame_age_ms={frame_age_ms:.2f} error={error or '-'}"
+        )
+        return frame, details
 
-        print(f"rgb565 stream connected: remote={request.remote_addr}", flush=True)
+    return stream_full_frames("rgb565 stream", latest_frame_provider, include_producer_stats=True)
 
-        try:
-            while True:
-                frame, sequence, prepared_at, render_ms, producer_interval_ms, error = latest_rgb565_frame_snapshot()
-                frame_started = time.monotonic()
-                stream_interval_ms = 0.0 if last_sent_at is None else (frame_started - last_sent_at) * 1000
-                last_sent_at = frame_started
 
-                yield frame
+@app.route("/stream-test.rgb565")
+def stream_test_rgb565():
+    def constant_frame_provider():
+        return CONSTANT_TEST_FRAME, "source=constant"
 
-                flushed_at = time.monotonic()
-                write_flush_ms = (flushed_at - frame_started) * 1000
-                sent_frames += 1
-                worst_write_flush_ms = max(worst_write_flush_ms, write_flush_ms)
-                worst_interval_ms = max(worst_interval_ms, stream_interval_ms)
-                is_spike = write_flush_ms > STREAM_SPIKE_LOG_MS or stream_interval_ms > STREAM_SPIKE_LOG_MS
-                if is_spike:
-                    spike_count += 1
-                    frame_age_ms = (frame_started - prepared_at) * 1000
-                    print(
-                        "rgb565 stream spike: "
-                        f"remote={request.remote_addr} seq={sequence} "
-                        f"write_flush_ms={write_flush_ms:.2f} "
-                        f"stream_interval_ms={stream_interval_ms:.2f} "
-                        f"producer_render_ms={render_ms:.2f} "
-                        f"producer_interval_ms={producer_interval_ms:.2f} "
-                        f"frame_age_ms={frame_age_ms:.2f} "
-                        f"error={error or '-'}",
-                        flush=True,
-                    )
-
-                now = time.monotonic()
-                if now - last_stats_log >= STREAM_STATS_LOG_SECONDS:
-                    print(
-                        "rgb565 stream stats: "
-                        f"remote={request.remote_addr} frames={sent_frames} "
-                        f"last_write_flush_ms={write_flush_ms:.2f} "
-                        f"worst_write_flush_ms={worst_write_flush_ms:.2f} "
-                        f"last_stream_interval_ms={stream_interval_ms:.2f} "
-                        f"worst_stream_interval_ms={worst_interval_ms:.2f} "
-                        f"producer_render_ms={render_ms:.2f} "
-                        f"producer_interval_ms={producer_interval_ms:.2f} "
-                        f"spikes={spike_count}",
-                        flush=True,
-                    )
-                    last_stats_log = now
-                    sent_frames = 0
-                    worst_write_flush_ms = 0.0
-                    worst_interval_ms = 0.0
-                    spike_count = 0
-
-                next_tick += TARGET_STREAM_FRAME_SECONDS
-                sleep_for = next_tick - time.monotonic()
-                if sleep_for > 0:
-                    time.sleep(sleep_for)
-                else:
-                    next_tick = time.monotonic()
-        except GeneratorExit:
-            print(f"rgb565 stream disconnected: remote={request.remote_addr}", flush=True)
-            raise
-
-    return Response(
-        stream_with_context(generate()),
-        content_type="application/octet-stream",
-        headers=rgb565_response_headers(),
-        direct_passthrough=True,
-    )
+    return stream_full_frames("rgb565 stream-test", constant_frame_provider)
 
 
 @app.route("/stop", methods=["POST"])
@@ -1525,8 +1619,22 @@ def stop_app():
     return redirect(url_for("home"))
 
 
+def start_runtime_services():
+    global runtime_services_started
+
+    if runtime_services_started:
+        return
+
+    with runtime_services_lock:
+        if runtime_services_started:
+            return
+
+        start_preview_proxy()
+        restore_last_app()
+        ensure_frame_producer_running()
+        runtime_services_started = True
+
+
 if __name__ == "__main__":
-    start_preview_proxy()
-    restore_last_app()
-    ensure_frame_producer_running()
+    start_runtime_services()
     app.run(host="0.0.0.0", port=int(FLASK_PORT), threaded=True)

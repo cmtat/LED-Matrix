@@ -16,6 +16,11 @@ services:
       - TARGET_STREAM_FPS=30
       - STREAM_SPIKE_LOG_MS=50
       - STREAM_STATS_LOG_SECONDS=5
+      - STREAM_SOCKET_SNDBUF=262144
+      - GUNICORN_WORKERS=1
+      - GUNICORN_THREADS=8
+      - GUNICORN_TIMEOUT=0
+      - GUNICORN_KEEPALIVE=75
       - DATA_DIR=/app/data
     volumes:
       - matrix-v2-data:/app/data

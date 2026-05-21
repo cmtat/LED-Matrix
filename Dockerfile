@@ -20,4 +20,4 @@ RUN mkdir -p /app/data /app/renders
 
 EXPOSE 5050 8080
 
-CMD ["python3", "app.py"]
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "app:app"]
