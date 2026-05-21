@@ -25,6 +25,7 @@ ESP32_FRAME_URL = os.environ.get(
 )
 MATRIX_WIDTH = int(os.environ.get("MATRIX_WIDTH", "64"))
 MATRIX_HEIGHT = int(os.environ.get("MATRIX_HEIGHT", "32"))
+FRAME_PIXEL_COUNT = MATRIX_WIDTH * MATRIX_HEIGHT
 FRAME_BYTE_COUNT = MATRIX_WIDTH * MATRIX_HEIGHT * 2
 TARGET_STREAM_FPS = max(int(os.environ.get("TARGET_STREAM_FPS", "30")), 1)
 TARGET_STREAM_FRAME_MS = 1000 / TARGET_STREAM_FPS
@@ -32,6 +33,7 @@ TARGET_STREAM_FRAME_SECONDS = TARGET_STREAM_FRAME_MS / 1000
 STREAM_SPIKE_LOG_MS = float(os.environ.get("STREAM_SPIKE_LOG_MS", "50"))
 STREAM_STATS_LOG_SECONDS = float(os.environ.get("STREAM_STATS_LOG_SECONDS", "5"))
 STREAM_SOCKET_SNDBUF = int(os.environ.get("STREAM_SOCKET_SNDBUF", "262144"))
+DEFAULT_LIVE_RENDER_REFRESH_SECONDS = max(int(os.environ.get("LIVE_RENDER_REFRESH_SECONDS", "60")), 0)
 
 app = Flask(__name__)
 
@@ -78,8 +80,9 @@ runtime_services_lock = threading.Lock()
 runtime_services_started = False
 CONSTANT_TEST_FRAME = bytes(FRAME_BYTE_COUNT)
 
-LIVE_RENDER_APP_REFRESH_SECONDS = {
-    "Death Clock/death_clock.star": 60,
+LIVE_RENDER_APP_REFRESH_SECONDS = {}
+NON_LOOPING_LIVE_RENDER_APPS = {
+    "Death Clock/death_clock.star",
 }
 
 PAGE = """
@@ -521,7 +524,7 @@ def current_frame_cache_key():
     except OSError:
         app_mtime = None
 
-    refresh_seconds = LIVE_RENDER_APP_REFRESH_SECONDS.get(current_app)
+    refresh_seconds = live_render_refresh_seconds(current_app)
     refresh_bucket = int(time.time() // refresh_seconds) if refresh_seconds else None
 
     return (current_app, str(current_app_path), app_mtime, options, refresh_bucket)
@@ -882,20 +885,21 @@ def cache_key_without_refresh_bucket(key):
     return key[:-1] if key else None
 
 
+def live_render_refresh_seconds(app_name):
+    if not app_name:
+        return 0
+
+    return LIVE_RENDER_APP_REFRESH_SECONDS.get(app_name, DEFAULT_LIVE_RENDER_REFRESH_SECONDS)
+
+
 def is_live_render_key(key):
     app_name = key[0] if key else None
-    return bool(LIVE_RENDER_APP_REFRESH_SECONDS.get(app_name))
+    return live_render_refresh_seconds(app_name) > 0
 
 
-def should_refresh_live_render(key, started_at, total_duration):
-    if not is_live_render_key(key) or total_duration <= 0:
-        return False
-
-    app_name = key[0]
-    refresh_seconds = LIVE_RENDER_APP_REFRESH_SECONDS[app_name]
-    refresh_after_ms = min(refresh_seconds * 500, max(total_duration // 2, 1))
-    elapsed_ms = int((time.monotonic() - started_at) * 1000)
-    return elapsed_ms >= refresh_after_ms
+def should_freeze_playback_key(key):
+    app_name = key[0] if key else None
+    return app_name in NON_LOOPING_LIVE_RENDER_APPS
 
 
 def tile_extents(frame):
@@ -1029,8 +1033,6 @@ def ensure_frame_cache_is_fresh():
             return
 
         if frame_cache["key"] == key and frame_cache["frames"]:
-            if should_refresh_live_render(key, frame_cache["started_at"], frame_cache["total_duration"]):
-                start_background_frame_render(key)
             return
 
         cached_key = frame_cache["key"]
@@ -1124,7 +1126,7 @@ def cached_rgb565_frame_at(now):
             return frames[0]
 
         elapsed_ms = int((now - started_at) * 1000)
-        if is_live_render_key(key):
+        if should_freeze_playback_key(key):
             elapsed_ms = min(elapsed_ms, total - 1)
         else:
             elapsed_ms = elapsed_ms % total
@@ -1186,13 +1188,27 @@ def ensure_frame_producer_running():
         frame_producer_thread.start()
 
 
+def count_changed_pixels(previous_frame, frame):
+    if previous_frame is None or len(previous_frame) != len(frame):
+        return FRAME_PIXEL_COUNT
+
+    return sum(
+        1
+        for index in range(0, min(len(previous_frame), len(frame)), 2)
+        if previous_frame[index] != frame[index] or previous_frame[index + 1] != frame[index + 1]
+    )
+
+
 def latest_frame_producer_loop():
     next_tick = time.monotonic()
     last_prepared_at = None
+    last_frame = None
     last_stats_log = time.monotonic()
     frame_count = 0
     worst_render_ms = 0.0
     worst_interval_ms = 0.0
+    total_changed_pixels = 0
+    worst_changed_pixels = 0
     spike_count = 0
 
     while True:
@@ -1210,30 +1226,38 @@ def latest_frame_producer_loop():
         render_ms = (prepared_at - tick_started) * 1000
         interval_ms = 0.0 if last_prepared_at is None else (prepared_at - last_prepared_at) * 1000
         last_prepared_at = prepared_at
+        changed_pixels = count_changed_pixels(last_frame, frame)
+        last_frame = frame
 
         publish_latest_frame(frame, render_ms, interval_ms, render_error)
 
         frame_count += 1
         worst_render_ms = max(worst_render_ms, render_ms)
         worst_interval_ms = max(worst_interval_ms, interval_ms)
+        total_changed_pixels += changed_pixels
+        worst_changed_pixels = max(worst_changed_pixels, changed_pixels)
         is_spike = render_ms > STREAM_SPIKE_LOG_MS or interval_ms > STREAM_SPIKE_LOG_MS
         if is_spike:
             spike_count += 1
             print(
                 "rgb565 producer spike: "
                 f"render_ms={render_ms:.2f} interval_ms={interval_ms:.2f} "
-                f"frame_bytes={len(frame)} error={render_error or '-'}",
+                f"changed_pixels={changed_pixels} frame_bytes={len(frame)} "
+                f"error={render_error or '-'}",
                 flush=True,
             )
 
         now = time.monotonic()
         if now - last_stats_log >= STREAM_STATS_LOG_SECONDS:
+            avg_changed_pixels = total_changed_pixels / frame_count if frame_count else 0
             print(
                 "rgb565 producer stats: "
                 f"frames={frame_count} last_render_ms={render_ms:.2f} "
                 f"worst_render_ms={worst_render_ms:.2f} "
                 f"last_interval_ms={interval_ms:.2f} "
                 f"worst_interval_ms={worst_interval_ms:.2f} "
+                f"avg_changed_pixels={avg_changed_pixels:.1f} "
+                f"worst_changed_pixels={worst_changed_pixels} "
                 f"spikes={spike_count}",
                 flush=True,
             )
@@ -1241,6 +1265,8 @@ def latest_frame_producer_loop():
             frame_count = 0
             worst_render_ms = 0.0
             worst_interval_ms = 0.0
+            total_changed_pixels = 0
+            worst_changed_pixels = 0
             spike_count = 0
 
         next_tick += TARGET_STREAM_FRAME_SECONDS
