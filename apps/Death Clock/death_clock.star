@@ -96,7 +96,7 @@ def render_frame(secs):
                 height = 8,
                 child = render.Text(
                     content = "seconds left",
-                    color = "#444444",
+                    color = "#ffffff",
                     font = "tom-thumb",
                 ),
             ),
