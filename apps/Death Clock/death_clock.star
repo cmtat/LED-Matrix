@@ -41,7 +41,7 @@ def main(config):
 
     frames = [
         render_frame(seconds_left - i if seconds_left - i >= 0 else 0)
-        for i in range(60)
+        for i in range(120)
     ]
 
     return render.Root(

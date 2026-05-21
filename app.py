@@ -58,6 +58,7 @@ frame_cache = {
     "webp_file": None,
     "metadata": [],
 }
+background_render_key = None
 
 LIVE_RENDER_APP_REFRESH_SECONDS = {
     "Death Clock/death_clock.star": 60,
@@ -903,13 +904,12 @@ def restore_last_app():
     current_app_path = full_path
 
 
-def render_current_webp():
+def render_current_webp(output_file=None):
     if not current_app_path:
         return None, "No app selected"
 
-    output_file = RENDER_DIR / "current.webp"
-    if output_file.exists():
-        output_file.unlink()
+    if output_file is None:
+        output_file = RENDER_DIR / f"current-{int(time.time() * 1000)}-{threading.get_ident()}.webp"
 
     options = load_options()
     pixlet_args = options_to_pixlet_args(options.get(current_app, ""))
@@ -928,6 +928,10 @@ def render_current_webp():
         return None, "Pixlet rendered, but current.webp was not created"
 
     return output_file, None
+
+
+def cache_key_without_refresh_bucket(key):
+    return key[:-1] if key else None
 
 
 def tile_extents(frame):
@@ -1063,16 +1067,39 @@ def ensure_frame_cache_is_fresh():
         if frame_cache["key"] == key and frame_cache["frames"]:
             return
 
+        cached_key = frame_cache["key"]
+        is_live_refresh = (
+            cached_key is not None
+            and frame_cache["frames"]
+            and cache_key_without_refresh_bucket(cached_key) == cache_key_without_refresh_bucket(key)
+            and cached_key != key
+        )
+        if is_live_refresh:
+            start_background_frame_render(key)
+            return
+
         if frame_cache["error_key"] == key:
             raise RuntimeError(frame_cache["error"])
 
-        webp_file, error = render_current_webp()
-        if error:
+    error = refresh_frame_cache_for_key(key)
+    if error:
+        raise RuntimeError(error)
+
+
+def refresh_frame_cache_for_key(key):
+    webp_file, error = render_current_webp()
+    if error:
+        with frame_cache_lock:
             frame_cache["error_key"] = key
             frame_cache["error"] = error
-            raise RuntimeError(error)
+        return error
 
-        frames, rgb_frames, durations, metadata = webp_to_rgb565_frames(webp_file)
+    frames, rgb_frames, durations, metadata = webp_to_rgb565_frames(webp_file)
+
+    with frame_cache_lock:
+        if current_frame_cache_key() != key:
+            return None
+
         frame_cache["frames"] = frames
         frame_cache["rgb_frames"] = rgb_frames
         frame_cache["durations"] = durations
@@ -1084,6 +1111,28 @@ def ensure_frame_cache_is_fresh():
         frame_cache["error"] = None
         frame_cache["webp_file"] = webp_file
         frame_cache["metadata"] = metadata
+    return None
+
+
+def start_background_frame_render(key):
+    global background_render_key
+
+    if background_render_key == key:
+        return
+
+    background_render_key = key
+
+    def refresh():
+        global background_render_key
+
+        try:
+            refresh_frame_cache_for_key(key)
+        finally:
+            with frame_cache_lock:
+                if background_render_key == key:
+                    background_render_key = None
+
+    threading.Thread(target=refresh, daemon=True).start()
 
 
 def current_rgb565_frame():
