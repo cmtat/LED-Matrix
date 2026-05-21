@@ -257,6 +257,23 @@ PAGE = """
             height: 128px;
         }
 
+        .pixlet-preview {
+            grid-column: 1 / -1;
+            min-height: 520px;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: #090a0d;
+            overflow: hidden;
+        }
+
+        .pixlet-preview iframe {
+            display: block;
+            width: 100%;
+            height: 520px;
+            border: 0;
+            background: #111;
+        }
+
         .empty-frame {
             color: var(--muted);
             font-size: 13px;
@@ -352,6 +369,12 @@ PAGE = """
                 width: 100%;
                 height: 100%;
             }
+
+            .pixlet-preview,
+            .pixlet-preview iframe {
+                min-height: 440px;
+                height: 440px;
+            }
         }
     </style>
 </head>
@@ -373,7 +396,7 @@ PAGE = """
                 </div>
 
                 <div class="links">
-                    <a class="button" href="{{ browser_pixlet_url }}" target="_blank">Open Preview</a>
+                    <a class="button" href="#pixlet-preview">Preview</a>
                     <a class="button secondary" href="{{ esp32_frame_url }}" target="_blank">Frame Endpoint</a>
                     <a class="button secondary" href="/esp32-config" target="_blank">ESP32 Config</a>
                     {% if current_app %}
@@ -390,6 +413,10 @@ PAGE = """
                 {% else %}
                     <div class="empty-frame">64 x 32 preview</div>
                 {% endif %}
+            </div>
+
+            <div class="pixlet-preview" id="pixlet-preview">
+                <iframe src="{{ current_preview_url }}" title="Pixlet preview"></iframe>
             </div>
         </section>
 
@@ -415,12 +442,12 @@ PAGE = """
                 </div>
 
                 <div class="card-actions">
-                    <form method="post" action="/run" onsubmit="window.open('/preview-loader?app_path=' + encodeURIComponent(this.app_path.value), '_blank');">
+                    <form method="post" action="/run">
                         <input type="hidden" name="app_path" value="{{ app_file }}">
                         <button type="submit">{{ "Restart" if app_file == current_app else "Run" }}</button>
                     </form>
                     {% if app_file == current_app %}
-                    <a class="button secondary" href="{{ browser_pixlet_url }}" target="_blank">Preview</a>
+                    <a class="button secondary" href="#pixlet-preview">Preview</a>
                     {% endif %}
                 </div>
             </article>
@@ -430,57 +457,6 @@ PAGE = """
 </body>
 </html>
 """
-
-RUNNING_PAGE = """
-<!doctype html>
-<html>
-<head>
-    <title>Starting Pixlet App</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 40px; background: #111; color: #f5f5f5; }
-        a { color: #8ab4ff; }
-    </style>
-</head>
-<body>
-    <h1>Starting {{ app_name }}</h1>
-    <p>A new Pixlet preview tab should open automatically.</p>
-    <p><a href="{{ browser_pixlet_url }}" target="_blank">Open Pixlet preview manually</a></p>
-
-    <script>
-        setTimeout(function() {
-            window.location.href = '/';
-        }, 800);
-    </script>
-</body>
-</html>
-"""
-
-PREVIEW_LOADER_PAGE = """
-<!doctype html>
-<html>
-<head>
-    <title>Loading Pixlet Preview</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 40px; background: #111; color: #f5f5f5; }
-        a { color: #8ab4ff; }
-    </style>
-</head>
-<body>
-    <h1>Loading Pixlet Preview...</h1>
-    <p>This tab will switch to the Pixlet preview automatically.</p>
-    <p><a href="{{ preview_url }}" id="manual-link">Open preview manually</a></p>
-
-    <script>
-        setTimeout(function() {
-            const previewUrl = {{ preview_url|tojson }};
-            const separator = previewUrl.includes('?') ? '&' : '?';
-            window.location.href = previewUrl + separator + 'cache=' + Date.now();
-        }, 1200);
-    </script>
-</body>
-</html>
-"""
-
 
 def find_apps():
     return sorted(str(path.relative_to(APPS_DIR)) for path in APPS_DIR.rglob("*.star"))
@@ -1189,13 +1165,6 @@ def home():
     )
 
 
-@app.route("/preview-loader")
-def preview_loader():
-    app_path = request.args.get("app_path")
-    preview_url = preview_url_for(app_name=app_path)
-    return render_template_string(PREVIEW_LOADER_PAGE, preview_url=preview_url)
-
-
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "current_app": current_app, "saved_options": load_options().get(current_app, "")})
@@ -1246,14 +1215,7 @@ def run_app():
     reset_frame_cache()
     save_state()
 
-    host = request.host.split(":")[0]
-    return render_template_string(
-        RUNNING_PAGE,
-        app_name=app_display_name(app_path),
-        host=host,
-        preview_url=preview_url_for(host, app_path),
-        browser_pixlet_url=BROWSER_PIXLET_URL,
-    )
+    return redirect(url_for("home"), code=303)
 
 
 @app.route("/save-options", methods=["POST"])
