@@ -59,6 +59,10 @@ frame_cache = {
     "metadata": [],
 }
 
+LIVE_RENDER_APP_REFRESH_SECONDS = {
+    "Death Clock/death_clock.star": 60,
+}
+
 PAGE = """
 <!doctype html>
 <html>
@@ -364,7 +368,7 @@ PAGE = """
             <div class="current">
                 <div>
                     <div class="eyebrow">Current app</div>
-                    <div class="current-title">{{ current_app or "Nothing selected" }}</div>
+                    <div class="current-title">{{ current_app_display_name or "Nothing selected" }}</div>
                 </div>
 
                 <div class="links">
@@ -397,7 +401,7 @@ PAGE = """
             {% for app_file in app_files %}
             <article class="card {% if app_file == current_app %}active{% endif %}">
                 <div>
-                    <div class="app-name">{{ app_file }}</div>
+                    <div class="app-name">{{ app_display_names.get(app_file, app_file) }}</div>
                     <div class="app-meta">
                         {% if app_file == current_app %}
                             Running now
@@ -481,6 +485,38 @@ def find_apps():
     return sorted(str(path.relative_to(APPS_DIR)) for path in APPS_DIR.rglob("*.star"))
 
 
+def fallback_app_display_name(app_path):
+    stem = Path(app_path).stem
+    return stem.replace("_", " ").replace("-", " ").title()
+
+
+def manifest_name_for_app(app_path):
+    manifest_path = (APPS_DIR / app_path).parent / "manifest.yaml"
+    if not manifest_path.exists():
+        return fallback_app_display_name(app_path)
+
+    try:
+        for line in manifest_path.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("name:"):
+                return stripped.split(":", 1)[1].strip().strip("\"'") or fallback_app_display_name(app_path)
+    except OSError:
+        pass
+
+    return fallback_app_display_name(app_path)
+
+
+def app_display_names(app_files):
+    return {app_path: manifest_name_for_app(app_path) for app_path in app_files}
+
+
+def app_display_name(app_path):
+    if not app_path:
+        return None
+
+    return manifest_name_for_app(app_path)
+
+
 def load_options():
     options_file = OPTIONS_FILE if OPTIONS_FILE.exists() else LEGACY_OPTIONS_FILE
 
@@ -539,7 +575,10 @@ def current_frame_cache_key():
     except OSError:
         app_mtime = None
 
-    return (current_app, str(current_app_path), app_mtime, options)
+    refresh_seconds = LIVE_RENDER_APP_REFRESH_SECONDS.get(current_app)
+    refresh_bucket = int(time.time() // refresh_seconds) if refresh_seconds else None
+
+    return (current_app, str(current_app_path), app_mtime, options, refresh_bucket)
 
 
 def reset_frame_cache():
@@ -1085,10 +1124,13 @@ def rgb565_response_headers():
 def home():
     host = request.host.split(":")[0]
     options_map = load_options()
+    app_files = find_apps()
     return render_template_string(
         PAGE,
-        app_files=find_apps(),
+        app_files=app_files,
         current_app=current_app,
+        current_app_display_name=app_display_name(current_app),
+        app_display_names=app_display_names(app_files),
         host=host,
         current_preview_url=preview_url_for(host),
         browser_pixlet_url=BROWSER_PIXLET_URL,
@@ -1158,7 +1200,7 @@ def run_app():
     host = request.host.split(":")[0]
     return render_template_string(
         RUNNING_PAGE,
-        app_name=app_path,
+        app_name=app_display_name(app_path),
         host=host,
         preview_url=preview_url_for(host, app_path),
         browser_pixlet_url=BROWSER_PIXLET_URL,

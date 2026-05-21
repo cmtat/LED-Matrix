@@ -41,7 +41,7 @@ def main(config):
 
     frames = [
         render_frame(seconds_left - i if seconds_left - i >= 0 else 0)
-        for i in range(10)
+        for i in range(60)
     ]
 
     return render.Root(
@@ -66,20 +66,18 @@ def render_frame(secs):
             render.Box(
                 width = 64,
                 height = 9,
-                color = "#1a0000",
                 child = render.Padding(
                     pad = (0, 1, 0, 0),
                     child = render.Text(
-                        content = "DEATH CLOCK",
-                        color = "#cc0000",
+                        content = "Death Clock",
+                        color = "#ffffff",
                         font = "tom-thumb",
                     ),
                 ),
             ),
-            render.Box(width = 64, height = 1, color = "#440000"),
             render.Box(
                 width = 64,
-                height = 14,
+                height = 15,
                 child = render.Row(
                     expanded = True,
                     main_align = "center",
