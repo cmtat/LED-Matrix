@@ -1,10 +1,11 @@
-from flask import Flask, Response, jsonify, redirect, render_template_string, request, send_file, url_for
+from flask import Flask, Response, jsonify, redirect, render_template_string, request, send_file, stream_with_context, url_for
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import subprocess
 import threading
+import time
 from pathlib import Path
-from PIL import Image
+from PIL import Image, ImageSequence
 from urllib.parse import parse_qsl, urlencode, urlparse
 import os
 import requests
@@ -24,6 +25,8 @@ ESP32_FRAME_URL = os.environ.get(
 MATRIX_WIDTH = int(os.environ.get("MATRIX_WIDTH", "64"))
 MATRIX_HEIGHT = int(os.environ.get("MATRIX_HEIGHT", "32"))
 FRAME_BYTE_COUNT = MATRIX_WIDTH * MATRIX_HEIGHT * 2
+TARGET_STREAM_FPS = max(int(os.environ.get("TARGET_STREAM_FPS", "30")), 1)
+TARGET_STREAM_FRAME_MS = 1000 / TARGET_STREAM_FPS
 
 app = Flask(__name__)
 
@@ -41,6 +44,18 @@ pixlet_process = None
 preview_proxy_server = None
 current_app = None
 current_app_path = None
+frame_cache_lock = threading.RLock()
+frame_cache = {
+    "frames": [bytes(FRAME_BYTE_COUNT)],
+    "durations": [1000],
+    "total_duration": 1000,
+    "started_at": time.monotonic(),
+    "rendered_at": None,
+    "key": None,
+    "error_key": None,
+    "error": None,
+    "webp_file": None,
+}
 
 PAGE = """
 <!doctype html>
@@ -512,6 +527,32 @@ def options_to_pixlet_args(query_string):
     return [f"{key}={value}" for key, value in parse_qsl(query_string or "", keep_blank_values=True)]
 
 
+def current_frame_cache_key():
+    if not current_app or not current_app_path:
+        return None
+
+    options = load_options().get(current_app, "")
+    try:
+        app_mtime = current_app_path.stat().st_mtime
+    except OSError:
+        app_mtime = None
+
+    return (current_app, str(current_app_path), app_mtime, options)
+
+
+def reset_frame_cache():
+    with frame_cache_lock:
+        frame_cache["frames"] = [bytes(FRAME_BYTE_COUNT)]
+        frame_cache["durations"] = [1000]
+        frame_cache["total_duration"] = 1000
+        frame_cache["started_at"] = time.monotonic()
+        frame_cache["rendered_at"] = None
+        frame_cache["key"] = None
+        frame_cache["error_key"] = None
+        frame_cache["error"] = None
+        frame_cache["webp_file"] = None
+
+
 def preview_url_for(host=None, app_name=None):
     options = load_options()
     query_string = options.get(app_name or current_app, "")
@@ -556,6 +597,7 @@ def save_options_for_app(app_path, raw_options):
         options.pop(app_path, None)
 
     save_options(options)
+    reset_frame_cache()
     return True, normalized
 
 
@@ -845,8 +887,8 @@ def render_current_webp():
     return output_file, None
 
 
-def webp_to_rgb565(webp_file):
-    image = Image.open(webp_file).convert("RGB").resize((MATRIX_WIDTH, MATRIX_HEIGHT))
+def image_to_rgb565(image):
+    image = image.convert("RGB").resize((MATRIX_WIDTH, MATRIX_HEIGHT))
     data = bytearray()
 
     for y in range(MATRIX_HEIGHT):
@@ -857,6 +899,90 @@ def webp_to_rgb565(webp_file):
             data.append(rgb565 & 0xFF)
 
     return bytes(data)
+
+
+def webp_to_rgb565_frames(webp_file):
+    image = Image.open(webp_file)
+    frames = []
+    durations = []
+
+    for frame in ImageSequence.Iterator(image):
+        frames.append(image_to_rgb565(frame.copy()))
+        duration = int(frame.info.get("duration", 33) or 33)
+        durations.append(max(duration, 1))
+
+    if not frames:
+        frames = [bytes(FRAME_BYTE_COUNT)]
+        durations = [1000]
+
+    return frames, durations
+
+
+def ensure_frame_cache_is_fresh():
+    key = current_frame_cache_key()
+
+    with frame_cache_lock:
+        if key is None:
+            if frame_cache["key"] is not None:
+                reset_frame_cache()
+            return
+
+        if frame_cache["key"] == key and frame_cache["frames"]:
+            return
+
+        if frame_cache["error_key"] == key:
+            raise RuntimeError(frame_cache["error"])
+
+        webp_file, error = render_current_webp()
+        if error:
+            frame_cache["error_key"] = key
+            frame_cache["error"] = error
+            raise RuntimeError(error)
+
+        frames, durations = webp_to_rgb565_frames(webp_file)
+        frame_cache["frames"] = frames
+        frame_cache["durations"] = durations
+        frame_cache["total_duration"] = sum(durations)
+        frame_cache["started_at"] = time.monotonic()
+        frame_cache["rendered_at"] = time.time()
+        frame_cache["key"] = key
+        frame_cache["error_key"] = None
+        frame_cache["error"] = None
+        frame_cache["webp_file"] = webp_file
+
+
+def current_rgb565_frame():
+    ensure_frame_cache_is_fresh()
+
+    with frame_cache_lock:
+        frames = frame_cache["frames"]
+        durations = frame_cache["durations"]
+        total = frame_cache["total_duration"]
+        started_at = frame_cache["started_at"]
+
+        if len(frames) == 1 or total <= 0:
+            return frames[0]
+
+        elapsed_ms = int((time.monotonic() - started_at) * 1000) % total
+
+        running = 0
+        for frame, duration in zip(frames, durations):
+            running += duration
+            if elapsed_ms < running:
+                return frame
+
+        return frames[-1]
+
+
+def rgb565_response_headers():
+    return {
+        "Cache-Control": "no-store",
+        "X-Matrix-Width": str(MATRIX_WIDTH),
+        "X-Matrix-Height": str(MATRIX_HEIGHT),
+        "X-Pixel-Format": "rgb565",
+        "X-Byte-Order": "big_endian",
+        "X-Frame-Bytes": str(FRAME_BYTE_COUNT),
+    }
 
 
 @app.route("/")
@@ -890,14 +1016,17 @@ def health():
 
 @app.route("/esp32-config")
 def esp32_config():
+    stream_url = ESP32_FRAME_URL.rsplit("/", 1)[0] + "/stream.rgb565"
     return jsonify({
         "frame_url": ESP32_FRAME_URL,
+        "stream_url": stream_url,
         "width": MATRIX_WIDTH,
         "height": MATRIX_HEIGHT,
         "pixel_format": "rgb565",
         "byte_order": "big_endian",
         "frame_bytes": FRAME_BYTE_COUNT,
-        "refresh_ms": 1000,
+        "refresh_ms": round(TARGET_STREAM_FRAME_MS),
+        "stream_fps": TARGET_STREAM_FPS,
         "current_app": current_app,
     })
 
@@ -927,6 +1056,7 @@ def run_app():
 
     current_app = app_path
     current_app_path = full_path
+    reset_frame_cache()
     save_state()
 
     host = request.host.split(":")[0]
@@ -964,41 +1094,56 @@ def save_app_options():
 
 @app.route("/frame.webp")
 def frame_webp():
-    webp_file, error = render_current_webp()
-    if error:
-        return error, 500
+    try:
+        ensure_frame_cache_is_fresh()
+    except RuntimeError as error:
+        return str(error), 500
+
+    with frame_cache_lock:
+        webp_file = frame_cache["webp_file"]
+
+    if not webp_file:
+        return "No app selected", 500
 
     return send_file(webp_file, mimetype="image/webp")
 
 
 @app.route("/frame.rgb565")
 def frame_rgb565():
-    webp_file, error = render_current_webp()
-    if error and not current_app_path:
-        rgb565 = bytes(FRAME_BYTE_COUNT)
-        return Response(
-            rgb565,
-            mimetype="application/octet-stream",
-            headers={
-                "Cache-Control": "no-store",
-                "X-Matrix-Width": str(MATRIX_WIDTH),
-                "X-Matrix-Height": str(MATRIX_HEIGHT),
-                "X-Pixel-Format": "rgb565",
-            },
-        )
-    if error:
-        return error, 500
+    try:
+        rgb565 = current_rgb565_frame()
+    except RuntimeError as error:
+        return str(error), 500
 
-    rgb565 = webp_to_rgb565(webp_file)
     return Response(
         rgb565,
         mimetype="application/octet-stream",
-        headers={
-            "Cache-Control": "no-store",
-            "X-Matrix-Width": str(MATRIX_WIDTH),
-            "X-Matrix-Height": str(MATRIX_HEIGHT),
-            "X-Pixel-Format": "rgb565",
-        },
+        headers=rgb565_response_headers(),
+    )
+
+
+@app.route("/stream.rgb565")
+def stream_rgb565():
+    def generate():
+        next_tick = time.monotonic()
+
+        while True:
+            try:
+                yield current_rgb565_frame()
+            except RuntimeError:
+                yield bytes(FRAME_BYTE_COUNT)
+
+            next_tick += TARGET_STREAM_FRAME_MS / 1000
+            sleep_for = next_tick - time.monotonic()
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            else:
+                next_tick = time.monotonic()
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="application/octet-stream",
+        headers=rgb565_response_headers(),
     )
 
 
@@ -1008,6 +1153,7 @@ def stop_app():
     stop_pixlet()
     current_app = None
     current_app_path = None
+    reset_frame_cache()
     save_state()
     return redirect(url_for("home"))
 

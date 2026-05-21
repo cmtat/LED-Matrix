@@ -16,18 +16,19 @@ The main URLs are:
 Dashboard:       http://192.168.1.252:5050
 Pixlet preview:  http://192.168.1.252:8080
 ESP32 frame:     http://192.168.1.252:5050/frame.rgb565
+ESP32 stream:    http://192.168.1.252:5050/stream.rgb565
 ESP32 config:    http://192.168.1.252:5050/esp32-config
 ```
 
 ## ESP32 Setup
 
-Configure the ESP32 firmware to connect to the same LAN as the ZimaOS host, then poll:
+Configure the ESP32 firmware to connect to the same LAN as the ZimaOS host, then read the continuous frame stream:
 
 ```text
-http://192.168.1.252:5050/frame.rgb565
+http://192.168.1.252:5050/stream.rgb565
 ```
 
-The frame endpoint returns raw RGB565 bytes for a 64x32 matrix:
+The stream yields raw RGB565 frames for a 64x32 matrix at 30 FPS by default. `/frame.rgb565` returns the same current animation frame as a single response for debug polling:
 
 ```text
 Width:       64
@@ -37,9 +38,9 @@ Byte order:  big endian, high byte first
 Frame size:  4096 bytes
 ```
 
-The endpoint returns a blank frame until an app is selected, so the ESP32 can boot and connect before the dashboard is used. A simple firmware loop can fetch the frame URL every 1 second and draw the returned 4096 bytes to the matrix.
+The endpoints return a blank frame until an app is selected, so the ESP32 can boot and connect before the dashboard is used.
 
-The ESP32 can also fetch `/esp32-config` to discover the frame URL, dimensions, pixel format, byte order, and suggested refresh interval.
+The ESP32 can also fetch `/esp32-config` to discover the frame URL, stream URL, dimensions, pixel format, byte order, and suggested refresh interval.
 
 ## Portainer Deploy
 
