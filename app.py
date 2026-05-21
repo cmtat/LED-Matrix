@@ -145,10 +145,10 @@ PAGE = """
         }
 
         .hero {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
             gap: 18px;
-            align-items: stretch;
             padding: 18px;
             border: 1px solid var(--line);
             border-radius: 8px;
@@ -183,6 +183,10 @@ PAGE = """
             display: flex;
             flex-wrap: wrap;
             gap: 10px;
+        }
+
+        .links form {
+            margin: 0;
         }
 
         a, button {
@@ -237,46 +241,6 @@ PAGE = """
 
         .button.danger:hover {
             background: #2b1719;
-        }
-
-        .frame-preview {
-            width: 256px;
-            min-height: 128px;
-            display: grid;
-            place-items: center;
-            border: 1px solid var(--line);
-            border-radius: 6px;
-            background: #090a0d;
-            overflow: hidden;
-        }
-
-        .frame-preview img {
-            display: block;
-            image-rendering: pixelated;
-            width: 256px;
-            height: 128px;
-        }
-
-        .pixlet-preview {
-            grid-column: 1 / -1;
-            min-height: 520px;
-            border: 1px solid var(--line);
-            border-radius: 6px;
-            background: #090a0d;
-            overflow: hidden;
-        }
-
-        .pixlet-preview iframe {
-            display: block;
-            width: 100%;
-            height: 520px;
-            border: 0;
-            background: #111;
-        }
-
-        .empty-frame {
-            color: var(--muted);
-            font-size: 13px;
         }
 
         .section-head {
@@ -357,23 +321,22 @@ PAGE = """
             }
 
             .hero {
+                align-items: stretch;
+                flex-direction: column;
+            }
+
+            .links,
+            .links form {
+                width: 100%;
+            }
+
+            .links .button,
+            .links button {
+                width: 100%;
+            }
+
+            .grid {
                 grid-template-columns: 1fr;
-            }
-
-            .frame-preview {
-                width: 100%;
-                aspect-ratio: 2 / 1;
-            }
-
-            .frame-preview img {
-                width: 100%;
-                height: 100%;
-            }
-
-            .pixlet-preview,
-            .pixlet-preview iframe {
-                min-height: 440px;
-                height: 440px;
             }
         }
     </style>
@@ -396,7 +359,7 @@ PAGE = """
                 </div>
 
                 <div class="links">
-                    <a class="button" href="#pixlet-preview">Preview</a>
+                    <a class="button" href="{{ browser_pixlet_url }}" target="_blank">Preview</a>
                     <a class="button secondary" href="{{ esp32_frame_url }}" target="_blank">Frame Endpoint</a>
                     <a class="button secondary" href="/esp32-config" target="_blank">ESP32 Config</a>
                     {% if current_app %}
@@ -405,18 +368,6 @@ PAGE = """
                     </form>
                     {% endif %}
                 </div>
-            </div>
-
-            <div class="frame-preview">
-                {% if current_app %}
-                    <img src="/frame.webp?cache={{ cache_bust }}" alt="Current rendered frame">
-                {% else %}
-                    <div class="empty-frame">64 x 32 preview</div>
-                {% endif %}
-            </div>
-
-            <div class="pixlet-preview" id="pixlet-preview">
-                <iframe src="{{ current_preview_url }}" title="Pixlet preview"></iframe>
             </div>
         </section>
 
@@ -447,7 +398,7 @@ PAGE = """
                         <button type="submit">{{ "Restart" if app_file == current_app else "Run" }}</button>
                     </form>
                     {% if app_file == current_app %}
-                    <a class="button secondary" href="#pixlet-preview">Preview</a>
+                    <a class="button secondary" href="{{ browser_pixlet_url }}" target="_blank">Preview</a>
                     {% endif %}
                 </div>
             </article>
@@ -1187,11 +1138,9 @@ def home():
         current_app_display_name=app_display_name(current_app),
         app_display_names=app_display_names(app_files),
         host=host,
-        current_preview_url=preview_url_for(host),
         browser_pixlet_url=BROWSER_PIXLET_URL,
         esp32_frame_url=ESP32_FRAME_URL,
         options_map=options_map,
-        cache_bust=f"{current_app}-{options_map.get(current_app, '')}",
     )
 
 
