@@ -40,6 +40,8 @@ Frame size:  4096 bytes
 
 The endpoints return a blank frame until an app is selected, so the ESP32 can boot and connect before the dashboard is used.
 
+`/stream.rgb565` keeps one HTTP response open and sends exactly one complete 4096-byte frame per tick. The HTTP stream uses `Content-Type: application/octet-stream`, disables cache/proxy buffering headers, and sends already-prepared latest-frame buffers so a slow Pixlet render does not stall connected ESP32 clients.
+
 The ESP32 can also fetch `/esp32-config` to discover the frame URL, stream URL, dimensions, pixel format, byte order, and suggested refresh interval.
 
 To inspect the server-side animation extraction, open `/debug/frames`. It exports the currently cached full-canvas PNG frames to `renders/debug_frames/frame_000.png`, `frame_001.png`, and so on, and returns frame metadata including source size, tile/update extents, duration, disposal, and blend fields.
@@ -63,6 +65,9 @@ BROWSER_PIXLET_URL=http://192.168.1.252:8080/
 ESP32_FRAME_URL=http://192.168.1.252:5050/frame.rgb565
 MATRIX_WIDTH=64
 MATRIX_HEIGHT=32
+TARGET_STREAM_FPS=30
+STREAM_SPIKE_LOG_MS=50
+STREAM_STATS_LOG_SECONDS=5
 DATA_DIR=/app/data
 ```
 
@@ -78,3 +83,11 @@ http://192.168.1.252:8080
 http://192.168.1.252:5050/frame.rgb565
 http://192.168.1.252:5050/esp32-config
 ```
+
+Then measure stream cadence from another machine on the same LAN:
+
+```bash
+python3 tools/test_rgb565_stream.py http://192.168.1.252:5050/stream.rgb565 --frames 120
+```
+
+The average interval should be close to 33 ms and every frame read should be 4096 bytes. Watch the container logs for `rgb565 producer stats`, `rgb565 stream stats`, and any `rgb565 ... spike` lines. The Compose file uses `network_mode: host`, so this repo does not put nginx, Traefik, Caddy, or another reverse proxy in front of the stream; if Portainer adds one externally, disable buffering and gzip/compression for `/stream.rgb565`.

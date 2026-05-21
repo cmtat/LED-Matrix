@@ -27,6 +27,9 @@ MATRIX_HEIGHT = int(os.environ.get("MATRIX_HEIGHT", "32"))
 FRAME_BYTE_COUNT = MATRIX_WIDTH * MATRIX_HEIGHT * 2
 TARGET_STREAM_FPS = max(int(os.environ.get("TARGET_STREAM_FPS", "30")), 1)
 TARGET_STREAM_FRAME_MS = 1000 / TARGET_STREAM_FPS
+TARGET_STREAM_FRAME_SECONDS = TARGET_STREAM_FRAME_MS / 1000
+STREAM_SPIKE_LOG_MS = float(os.environ.get("STREAM_SPIKE_LOG_MS", "50"))
+STREAM_STATS_LOG_SECONDS = float(os.environ.get("STREAM_STATS_LOG_SECONDS", "5"))
 
 app = Flask(__name__)
 
@@ -59,6 +62,16 @@ frame_cache = {
     "metadata": [],
 }
 background_render_key = None
+latest_frame_lock = threading.Condition()
+latest_frame = {
+    "frame": bytes(FRAME_BYTE_COUNT),
+    "sequence": 0,
+    "prepared_at": time.monotonic(),
+    "render_ms": 0.0,
+    "interval_ms": 0.0,
+    "error": None,
+}
+frame_producer_thread = None
 
 LIVE_RENDER_APP_REFRESH_SECONDS = {
     "Death Clock/death_clock.star": 60,
@@ -522,6 +535,7 @@ def reset_frame_cache():
         frame_cache["error"] = None
         frame_cache["webp_file"] = None
         frame_cache["metadata"] = []
+    publish_latest_frame(bytes(FRAME_BYTE_COUNT), render_ms=0, interval_ms=0)
 
 
 def preview_url_for(host=None, app_name=None):
@@ -1090,6 +1104,10 @@ def start_background_frame_render(key):
 def current_rgb565_frame():
     ensure_frame_cache_is_fresh()
 
+    return cached_rgb565_frame_at(time.monotonic())
+
+
+def cached_rgb565_frame_at(now):
     with frame_cache_lock:
         frames = frame_cache["frames"]
         durations = frame_cache["durations"]
@@ -1100,7 +1118,7 @@ def current_rgb565_frame():
         if len(frames) == 1 or total <= 0:
             return frames[0]
 
-        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        elapsed_ms = int((now - started_at) * 1000)
         if is_live_render_key(key):
             elapsed_ms = min(elapsed_ms, total - 1)
         else:
@@ -1115,9 +1133,126 @@ def current_rgb565_frame():
         return frames[-1]
 
 
+def publish_latest_frame(frame, render_ms, interval_ms, error=None):
+    if len(frame) != FRAME_BYTE_COUNT:
+        print(
+            f"latest-frame rejected invalid frame: bytes={len(frame)} expected={FRAME_BYTE_COUNT}",
+            flush=True,
+        )
+        return
+
+    with latest_frame_lock:
+        latest_frame["frame"] = frame
+        latest_frame["sequence"] += 1
+        latest_frame["prepared_at"] = time.monotonic()
+        latest_frame["render_ms"] = render_ms
+        latest_frame["interval_ms"] = interval_ms
+        latest_frame["error"] = error
+        latest_frame_lock.notify_all()
+
+
+def latest_rgb565_frame_snapshot():
+    with latest_frame_lock:
+        return (
+            latest_frame["frame"],
+            latest_frame["sequence"],
+            latest_frame["prepared_at"],
+            latest_frame["render_ms"],
+            latest_frame["interval_ms"],
+            latest_frame["error"],
+        )
+
+
+def ensure_frame_producer_running():
+    global frame_producer_thread
+
+    if frame_producer_thread and frame_producer_thread.is_alive():
+        return
+
+    with latest_frame_lock:
+        if frame_producer_thread and frame_producer_thread.is_alive():
+            return
+
+        frame_producer_thread = threading.Thread(
+            target=latest_frame_producer_loop,
+            name="rgb565-latest-frame-producer",
+            daemon=True,
+        )
+        frame_producer_thread.start()
+
+
+def latest_frame_producer_loop():
+    next_tick = time.monotonic()
+    last_prepared_at = None
+    last_stats_log = time.monotonic()
+    frame_count = 0
+    worst_render_ms = 0.0
+    worst_interval_ms = 0.0
+    spike_count = 0
+
+    while True:
+        tick_started = time.monotonic()
+        render_error = None
+
+        try:
+            ensure_frame_cache_is_fresh()
+            frame = cached_rgb565_frame_at(tick_started)
+        except RuntimeError as error:
+            frame = bytes(FRAME_BYTE_COUNT)
+            render_error = str(error)
+
+        prepared_at = time.monotonic()
+        render_ms = (prepared_at - tick_started) * 1000
+        interval_ms = 0.0 if last_prepared_at is None else (prepared_at - last_prepared_at) * 1000
+        last_prepared_at = prepared_at
+
+        publish_latest_frame(frame, render_ms, interval_ms, render_error)
+
+        frame_count += 1
+        worst_render_ms = max(worst_render_ms, render_ms)
+        worst_interval_ms = max(worst_interval_ms, interval_ms)
+        is_spike = render_ms > STREAM_SPIKE_LOG_MS or interval_ms > STREAM_SPIKE_LOG_MS
+        if is_spike:
+            spike_count += 1
+            print(
+                "rgb565 producer spike: "
+                f"render_ms={render_ms:.2f} interval_ms={interval_ms:.2f} "
+                f"frame_bytes={len(frame)} error={render_error or '-'}",
+                flush=True,
+            )
+
+        now = time.monotonic()
+        if now - last_stats_log >= STREAM_STATS_LOG_SECONDS:
+            print(
+                "rgb565 producer stats: "
+                f"frames={frame_count} last_render_ms={render_ms:.2f} "
+                f"worst_render_ms={worst_render_ms:.2f} "
+                f"last_interval_ms={interval_ms:.2f} "
+                f"worst_interval_ms={worst_interval_ms:.2f} "
+                f"spikes={spike_count}",
+                flush=True,
+            )
+            last_stats_log = now
+            frame_count = 0
+            worst_render_ms = 0.0
+            worst_interval_ms = 0.0
+            spike_count = 0
+
+        next_tick += TARGET_STREAM_FRAME_SECONDS
+        sleep_for = next_tick - time.monotonic()
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+        else:
+            next_tick = time.monotonic()
+
+
 def rgb565_response_headers():
     return {
-        "Cache-Control": "no-store",
+        "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "Content-Encoding": "identity",
+        "X-Accel-Buffering": "no",
         "X-Matrix-Width": str(MATRIX_WIDTH),
         "X-Matrix-Height": str(MATRIX_HEIGHT),
         "X-Pixel-Format": "rgb565",
@@ -1192,6 +1327,7 @@ def run_app():
     current_app = app_path
     current_app_path = full_path
     reset_frame_cache()
+    ensure_frame_producer_running()
     save_state()
 
     return redirect(url_for("home"), code=303)
@@ -1289,33 +1425,91 @@ def frame_rgb565():
 
     return Response(
         rgb565,
-        mimetype="application/octet-stream",
+        content_type="application/octet-stream",
         headers=rgb565_response_headers(),
     )
 
 
 @app.route("/stream.rgb565")
 def stream_rgb565():
+    ensure_frame_producer_running()
+
     def generate():
         next_tick = time.monotonic()
+        last_sent_at = None
+        last_stats_log = time.monotonic()
+        sent_frames = 0
+        worst_write_flush_ms = 0.0
+        worst_interval_ms = 0.0
+        spike_count = 0
 
-        while True:
-            try:
-                yield current_rgb565_frame()
-            except RuntimeError:
-                yield bytes(FRAME_BYTE_COUNT)
+        print(f"rgb565 stream connected: remote={request.remote_addr}", flush=True)
 
-            next_tick += TARGET_STREAM_FRAME_MS / 1000
-            sleep_for = next_tick - time.monotonic()
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-            else:
-                next_tick = time.monotonic()
+        try:
+            while True:
+                frame, sequence, prepared_at, render_ms, producer_interval_ms, error = latest_rgb565_frame_snapshot()
+                frame_started = time.monotonic()
+                stream_interval_ms = 0.0 if last_sent_at is None else (frame_started - last_sent_at) * 1000
+                last_sent_at = frame_started
+
+                yield frame
+
+                flushed_at = time.monotonic()
+                write_flush_ms = (flushed_at - frame_started) * 1000
+                sent_frames += 1
+                worst_write_flush_ms = max(worst_write_flush_ms, write_flush_ms)
+                worst_interval_ms = max(worst_interval_ms, stream_interval_ms)
+                is_spike = write_flush_ms > STREAM_SPIKE_LOG_MS or stream_interval_ms > STREAM_SPIKE_LOG_MS
+                if is_spike:
+                    spike_count += 1
+                    frame_age_ms = (frame_started - prepared_at) * 1000
+                    print(
+                        "rgb565 stream spike: "
+                        f"remote={request.remote_addr} seq={sequence} "
+                        f"write_flush_ms={write_flush_ms:.2f} "
+                        f"stream_interval_ms={stream_interval_ms:.2f} "
+                        f"producer_render_ms={render_ms:.2f} "
+                        f"producer_interval_ms={producer_interval_ms:.2f} "
+                        f"frame_age_ms={frame_age_ms:.2f} "
+                        f"error={error or '-'}",
+                        flush=True,
+                    )
+
+                now = time.monotonic()
+                if now - last_stats_log >= STREAM_STATS_LOG_SECONDS:
+                    print(
+                        "rgb565 stream stats: "
+                        f"remote={request.remote_addr} frames={sent_frames} "
+                        f"last_write_flush_ms={write_flush_ms:.2f} "
+                        f"worst_write_flush_ms={worst_write_flush_ms:.2f} "
+                        f"last_stream_interval_ms={stream_interval_ms:.2f} "
+                        f"worst_stream_interval_ms={worst_interval_ms:.2f} "
+                        f"producer_render_ms={render_ms:.2f} "
+                        f"producer_interval_ms={producer_interval_ms:.2f} "
+                        f"spikes={spike_count}",
+                        flush=True,
+                    )
+                    last_stats_log = now
+                    sent_frames = 0
+                    worst_write_flush_ms = 0.0
+                    worst_interval_ms = 0.0
+                    spike_count = 0
+
+                next_tick += TARGET_STREAM_FRAME_SECONDS
+                sleep_for = next_tick - time.monotonic()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                else:
+                    next_tick = time.monotonic()
+        except GeneratorExit:
+            print(f"rgb565 stream disconnected: remote={request.remote_addr}", flush=True)
+            raise
 
     return Response(
         stream_with_context(generate()),
-        mimetype="application/octet-stream",
+        content_type="application/octet-stream",
         headers=rgb565_response_headers(),
+        direct_passthrough=True,
     )
 
 
@@ -1326,6 +1520,7 @@ def stop_app():
     current_app = None
     current_app_path = None
     reset_frame_cache()
+    ensure_frame_producer_running()
     save_state()
     return redirect(url_for("home"))
 
@@ -1333,4 +1528,5 @@ def stop_app():
 if __name__ == "__main__":
     start_preview_proxy()
     restore_last_app()
-    app.run(host="0.0.0.0", port=int(FLASK_PORT))
+    ensure_frame_producer_running()
+    app.run(host="0.0.0.0", port=int(FLASK_PORT), threaded=True)

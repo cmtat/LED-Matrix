@@ -13,6 +13,9 @@ services:
       - ESP32_FRAME_URL=http://192.168.1.252:5050/frame.rgb565
       - MATRIX_WIDTH=64
       - MATRIX_HEIGHT=32
+      - TARGET_STREAM_FPS=30
+      - STREAM_SPIKE_LOG_MS=50
+      - STREAM_STATS_LOG_SECONDS=5
       - DATA_DIR=/app/data
     volumes:
       - matrix-v2-data:/app/data
