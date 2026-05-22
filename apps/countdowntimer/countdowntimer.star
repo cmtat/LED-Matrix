@@ -29,13 +29,13 @@ def main(config):
 
     # Create animation frames for real-time countdown and effects
     frames = []
-    for i in range(60):  # 60 frames for 1 minute of animation
-        # Calculate current time for this frame (simulate time passing)
-        frame_time = time.now() + time.parse_duration("%ds" % (i // 2))  # Update every 2 frames
+    for i in range(120):  # 120 frames at 500ms = 60 seconds, matching the cache refresh period
+        # Each pair of frames advances the simulated time by 1 second
+        frame_time = time.now() + time.parse_duration("%ds" % (i // 2))
         frames.append(render_frame(deadline, title, granularity, dot_color, title_color, time_color, date_color, show_title, show_time, show_dots, show_date, i, frame_time))
 
     return render.Root(
-        delay = 500,  # Update every 500ms for smoother animation
+        delay = 500,  # 500ms per frame
         child = render.Animation(
             children = frames,
         ),

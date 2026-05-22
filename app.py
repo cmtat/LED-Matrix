@@ -478,8 +478,31 @@ def load_options():
         return {}
 
 
+_options_cache_lock = threading.Lock()
+_options_cache = {"mtime": None, "data": {}}
+
+
+def load_options_cached():
+    """Return options, re-reading from disk only when the file mtime changes."""
+    options_file = OPTIONS_FILE if OPTIONS_FILE.exists() else LEGACY_OPTIONS_FILE
+    try:
+        mtime = options_file.stat().st_mtime if options_file.exists() else None
+    except OSError:
+        mtime = None
+
+    with _options_cache_lock:
+        if _options_cache["mtime"] == mtime:
+            return _options_cache["data"]
+        data = load_options()
+        _options_cache["mtime"] = mtime
+        _options_cache["data"] = data
+        return data
+
+
 def save_options(options):
     OPTIONS_FILE.write_text(json.dumps(options, indent=2, sort_keys=True))
+    with _options_cache_lock:
+        _options_cache["mtime"] = None
 
 
 def save_state():
@@ -518,7 +541,7 @@ def current_frame_cache_key():
     if not current_app or not current_app_path:
         return None
 
-    options = load_options().get(current_app, "")
+    options = load_options_cached().get(current_app, "")
     try:
         app_mtime = current_app_path.stat().st_mtime
     except OSError:
@@ -983,7 +1006,10 @@ def composited_animation_frames(image):
             paste_box = update_box[:2]
 
         canvas.alpha_composite(update, dest=paste_box)
-        rgb_frames.append(canvas.convert("RGB").resize((MATRIX_WIDTH, MATRIX_HEIGHT)))
+        frame_rgb = canvas.convert("RGB")
+        if frame_rgb.size != (MATRIX_WIDTH, MATRIX_HEIGHT):
+            frame_rgb = frame_rgb.resize((MATRIX_WIDTH, MATRIX_HEIGHT))
+        rgb_frames.append(frame_rgb)
 
         duration = int(image.info.get("duration", frame_rgba.info.get("duration", 33)) or 33)
         durations.append(max(duration, 1))
@@ -998,16 +1024,16 @@ def composited_animation_frames(image):
 
 
 def image_to_rgb565(image):
-    image = image.convert("RGB").resize((MATRIX_WIDTH, MATRIX_HEIGHT))
-    data = bytearray()
-
-    for y in range(MATRIX_HEIGHT):
-        for x in range(MATRIX_WIDTH):
-            r, g, b = image.getpixel((x, y))
-            rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
-            data.append((rgb565 >> 8) & 0xFF)
-            data.append(rgb565 & 0xFF)
-
+    if image.mode != "RGB" or image.size != (MATRIX_WIDTH, MATRIX_HEIGHT):
+        image = image.convert("RGB").resize((MATRIX_WIDTH, MATRIX_HEIGHT))
+    raw = image.tobytes()
+    data = bytearray(FRAME_BYTE_COUNT)
+    j = 0
+    for i in range(0, len(raw), 3):
+        v = ((raw[i] & 0xF8) << 8) | ((raw[i + 1] & 0xFC) << 3) | (raw[i + 2] >> 3)
+        data[j] = v >> 8
+        data[j + 1] = v & 0xFF
+        j += 2
     return bytes(data)
 
 
